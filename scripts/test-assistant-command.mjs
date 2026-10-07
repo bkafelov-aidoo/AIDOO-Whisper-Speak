@@ -60,10 +60,13 @@ test("recognizes natural commands that end the AI conversation", () => {
     "Край",
     "Затвори",
     "Затвори ми",
+    "Затвори връзката",
     "Приключи разговора",
     "Приключваме",
+    "Приключихме",
     "Приключваме разговора",
     "Спри асистента",
+    "Спри връзката",
     "Прекрати сесията",
     "Довиждане",
     "End conversation",
@@ -74,10 +77,24 @@ test("recognizes natural commands that end the AI conversation", () => {
   }
 });
 
+test("bare край is a close command but the complete note ending is not", () => {
+  assert.equal(detectAssistantVoiceCommand("Край"), "end-session");
+  assert.equal(detectAssistantVoiceCommand("Край на забележката"), null);
+});
+
 test("does not close on words that merely resemble an end command", () => {
-  assert.equal(detectAssistantVoiceCommand("В крайна сметка продължаваме"), null);
-  assert.equal(detectAssistantVoiceCommand("Спри да говориш толкова бързо"), null);
-  assert.equal(detectAssistantVoiceCommand("Затворих вратата"), null);
+  for (const phrase of [
+    "В крайна сметка продължаваме",
+    "Спри да говориш толкова бързо",
+    "Затворих вратата",
+    "Не казвай затвори",
+    "Той каза приключихме",
+    "Повтори фразата спри връзката",
+    "„Затвори“",
+    "Командата е „Край“",
+  ]) {
+    assert.equal(detectAssistantVoiceCommand(phrase), null, phrase);
+  }
 });
 
 test("recognizes a fragmented end command once", () => {
@@ -88,7 +105,7 @@ test("recognizes a fragmented end command once", () => {
 });
 
 test("maps a real Live input-transcript event to the end-session command", () => {
-  for (const phrase of ["Край.", "Затвори!", "Приключваме."]) {
+  for (const phrase of ["Затвори!", "Приключваме."]) {
     const detector = new AssistantVoiceCommandDetector();
     assert.equal(detectAssistantVoiceCommandFromLiveEvent({
       type: "session.input_transcript.delta",

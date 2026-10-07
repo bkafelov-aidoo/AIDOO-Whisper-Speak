@@ -4,7 +4,11 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_ROOTS = (ROOT / "src", ROOT / "src-tauri" / "src", ROOT / "scripts")
+SOURCE_ROOTS = (
+    ROOT / "src",
+    ROOT / "src-tauri" / "src",
+    ROOT / "scripts",
+)
 CODE_SUFFIXES = {".css", ".html", ".mjs", ".py", ".rs", ".sh", ".ts", ".tsx"}
 MAX_LINES = 1_000
 

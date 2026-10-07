@@ -1,6 +1,6 @@
-use super::client::{AidooClient, AidooError};
+use super::client::{AidooClient, AidooError, AidooErrorKind};
 use super::draft::{same_snapshot, verifies};
-use super::treatment::{same_treatment_snapshot, verifies_treatment};
+use super::treatment::{same_treatment_snapshot, verifies_treatment_with_identity};
 use super::types::*;
 
 pub async fn apply_confirmed_draft(
@@ -115,6 +115,83 @@ pub async fn create_status_visit(
     })
 }
 
+pub async fn create_treatment_visit(
+    client: &AidooClient,
+    session: &str,
+    clinic_id: &str,
+    patient_id: &str,
+    doctor_id: &str,
+) -> Result<TreatmentVisitResult, AidooError> {
+    match client.active_visit(session, clinic_id, patient_id).await {
+        Ok(visit) if !visit.is_finished && !visit.cancelled => {
+            return Ok(TreatmentVisitResult {
+                visit: Some(visit),
+                created: false,
+                verification: VerificationResult {
+                    outcome: VerificationOutcome::Verified,
+                    message: "Активното посещение е потвърдено.".into(),
+                },
+            });
+        }
+        Ok(_) => {
+            return Ok(TreatmentVisitResult {
+                visit: None,
+                created: false,
+                verification: VerificationResult {
+                    outcome: VerificationOutcome::Rejected,
+                    message: "Съществуващото посещение е приключено или отказано.".into(),
+                },
+            });
+        }
+        Err(error) if !error.is_not_found() => return Err(error),
+        Err(_) => {}
+    }
+
+    let created = match client
+        .create_visit(session, clinic_id, patient_id, doctor_id)
+        .await
+    {
+        Ok(visit) => visit,
+        Err(error) if treatment_write_may_have_committed(&error) => {
+            let _ = client.active_visit(session, clinic_id, patient_id).await;
+            return Ok(TreatmentVisitResult {
+                visit: None,
+                created: false,
+                verification: VerificationResult {
+                    outcome: VerificationOutcome::Uncertain,
+                    message: "Създаването на посещението не можа да бъде потвърдено. Не повтаряйте автоматично."
+                        .into(),
+                },
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    let active = client.active_visit(session, clinic_id, patient_id).await;
+    match active {
+        Ok(active)
+            if active.id == created.id && !active.is_finished && !active.cancelled =>
+        {
+            Ok(TreatmentVisitResult {
+                visit: Some(active),
+                created: true,
+                verification: VerificationResult {
+                    outcome: VerificationOutcome::Verified,
+                    message: "Новото посещение е създадено и потвърдено.".into(),
+                },
+            })
+        }
+        _ => Ok(TreatmentVisitResult {
+            visit: None,
+            created: false,
+            verification: VerificationResult {
+                outcome: VerificationOutcome::Uncertain,
+                message: "AIDOO прие заявката, но новото посещение не можа да бъде потвърдено. Не повтаряйте автоматично."
+                    .into(),
+            },
+        }),
+    }
+}
+
 pub async fn apply_confirmed_treatment_draft(
     client: &AidooClient,
     session: &str,
@@ -176,14 +253,24 @@ pub async fn apply_confirmed_treatment_draft(
                     &draft.patient_id,
                     &draft.visit_id,
                     &draft.treatment,
+                    draft.procedures.first(),
                 )
                 .await
         }
     };
     let treatment_id = match write {
         Ok(treatment) => treatment.id,
-        Err(error) if error.is_ambiguous_write() => {
-            return verify_treatment(client, session, clinic_id, draft, true).await;
+        Err(error) if treatment_write_may_have_committed(&error) => {
+            return verify_treatment(
+                client,
+                session,
+                clinic_id,
+                draft,
+                draft.existing_treatment_id.as_deref(),
+                draft.treatment.treatment_id.as_deref(),
+                true,
+            )
+            .await;
         }
         Err(error) => {
             return Ok(VerificationResult {
@@ -193,6 +280,7 @@ pub async fn apply_confirmed_treatment_draft(
         }
     };
     let mut completed_write = row_needs_write;
+    let mut expected_treatment_id = draft.treatment.treatment_id.clone();
 
     for procedure in &draft.procedures {
         match client
@@ -205,9 +293,34 @@ pub async fn apply_confirmed_treatment_draft(
             )
             .await
         {
-            Ok(_) => completed_write = true,
-            Err(error) if error.is_ambiguous_write() => {
-                return verify_treatment(client, session, clinic_id, draft, true).await;
+            Ok(response) => {
+                completed_write = true;
+                if let Some(returned_id) = response.treatment_id {
+                    if returned_id.trim().is_empty()
+                        || expected_treatment_id
+                            .as_ref()
+                            .is_some_and(|expected| expected != &returned_id)
+                    {
+                        return Ok(VerificationResult {
+                            outcome: VerificationOutcome::Uncertain,
+                            message: "AIDOO върна противоречив идентификатор на лечението. Не повтаряйте автоматично."
+                                .into(),
+                        });
+                    }
+                    expected_treatment_id = Some(returned_id);
+                }
+            }
+            Err(error) if treatment_write_may_have_committed(&error) => {
+                return verify_treatment(
+                    client,
+                    session,
+                    clinic_id,
+                    draft,
+                    Some(&treatment_id),
+                    expected_treatment_id.as_deref(),
+                    true,
+                )
+                .await;
             }
             Err(error) if !completed_write => {
                 return Ok(VerificationResult {
@@ -219,12 +332,16 @@ pub async fn apply_confirmed_treatment_draft(
                 });
             }
             Err(error) => {
-                let verification = verify_treatment(client, session, clinic_id, draft, false).await;
-                if let Ok(result) = &verification {
-                    if result.outcome == VerificationOutcome::Verified {
-                        return verification;
-                    }
-                }
+                let verification = verify_treatment(
+                    client,
+                    session,
+                    clinic_id,
+                    draft,
+                    Some(&treatment_id),
+                    expected_treatment_id.as_deref(),
+                    false,
+                )
+                .await;
                 let read_back = match verification {
                     Ok(result) => result.message,
                     Err(read_error) => {
@@ -241,7 +358,20 @@ pub async fn apply_confirmed_treatment_draft(
             }
         }
     }
-    verify_treatment(client, session, clinic_id, draft, false).await
+    verify_treatment(
+        client,
+        session,
+        clinic_id,
+        draft,
+        Some(&treatment_id),
+        expected_treatment_id.as_deref(),
+        false,
+    )
+    .await
+}
+
+fn treatment_write_may_have_committed(error: &AidooError) -> bool {
+    error.is_ambiguous_write() || error.kind == AidooErrorKind::Protocol
 }
 
 async fn verify_treatment(
@@ -249,12 +379,14 @@ async fn verify_treatment(
     session: &str,
     clinic_id: &str,
     draft: &TreatmentDraft,
+    expected_row_id: Option<&str>,
+    expected_treatment_id: Option<&str>,
     after_ambiguous_write: bool,
 ) -> Result<VerificationResult, AidooError> {
     let actual = client
         .visit_treatments(session, clinic_id, &draft.patient_id, &draft.visit_id)
         .await?;
-    if verifies_treatment(draft, &actual) {
+    if verifies_treatment_with_identity(draft, &actual, expected_row_id, expected_treatment_id) {
         Ok(VerificationResult {
             outcome: if after_ambiguous_write {
                 VerificationOutcome::VerifiedAfterAmbiguousWrite

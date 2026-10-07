@@ -251,19 +251,15 @@ async fn schedule_occupancy(
 }
 
 fn show_schedule_view(app: &AppHandle, state: &AppState, slot: &types::ScheduleSlot) {
-    let clinic_link = state.settings.lock().ok().and_then(|settings| {
-        if !settings.aidoo_browser_sync_enabled {
-            return None;
-        }
-        settings
-            .aidoo_clinic_url
-            .clone()
-            .or_else(|| settings.aidoo_clinic_slug.clone())
-    });
-    if let Some(clinic_link) = clinic_link {
-        presentation::present_schedule(
-            app.clone(),
-            clinic_link,
+    let enabled = state
+        .settings
+        .lock()
+        .map(|settings| settings.aidoo_browser_sync_enabled)
+        .unwrap_or(false);
+    if enabled {
+        let _ = presentation::present_schedule(
+            app,
+            state,
             slot.local_date.clone(),
             slot.doctor_id.clone(),
         );

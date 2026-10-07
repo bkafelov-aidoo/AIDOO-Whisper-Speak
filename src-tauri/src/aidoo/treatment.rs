@@ -1,4 +1,7 @@
-use super::types::*;
+use super::{
+    dental::{display_tooth, spoken_tooth},
+    types::*,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub fn build_treatment_draft(
@@ -9,6 +12,9 @@ pub fn build_treatment_draft(
     procedures: &[ProcedureCatalogEntry],
     change: TreatmentChange,
 ) -> Result<TreatmentDraft, String> {
+    let mut change = change;
+    let (tooth, is_milk_tooth) = normalize_tooth(&change.tooth, false)?;
+    change.tooth = tooth;
     if patient_id.trim().is_empty() || visit.id.trim().is_empty() {
         return Err("Липсва пациент или посещение.".into());
     }
@@ -110,7 +116,7 @@ pub fn build_treatment_draft(
         status: existing.and_then(|entry| entry.status.clone()),
         is_milk_tooth: existing
             .map(|entry| entry.is_milk_tooth)
-            .unwrap_or_else(|| is_milk_tooth(&change.tooth)),
+            .unwrap_or(is_milk_tooth),
     };
     let already_present = existing
         .map(|entry| {
@@ -151,7 +157,8 @@ pub fn build_treatment_draft(
         });
     }
 
-    let mut summary = vec![format!("реда за зъб {}", change.tooth)];
+    let display_tooth = display_tooth(&change.tooth, is_milk_tooth);
+    let mut summary = vec![format!("реда за зъб {}", spoken_tooth(&display_tooth))];
     if let Some(id) = &change.diagnosis_id {
         summary.push(format!("диагноза {}", diagnosis_names[id.as_str()]));
     }
@@ -183,28 +190,62 @@ pub fn same_treatment_snapshot(left: &[VisitTreatment], right: &[VisitTreatment]
     normalized(left) == normalized(right)
 }
 
+#[cfg(test)]
 pub fn verifies_treatment(draft: &TreatmentDraft, actual: &[VisitTreatment]) -> bool {
-    let expected_id = draft.existing_treatment_id.as_deref();
-    let baseline_ids = draft
-        .baseline
-        .iter()
-        .map(|entry| entry.id.as_str())
-        .collect::<BTreeSet<_>>();
+    verifies_treatment_with_identity(
+        draft,
+        actual,
+        draft.existing_treatment_id.as_deref(),
+        draft.treatment.treatment_id.as_deref(),
+    )
+}
+
+pub fn verifies_treatment_with_identity(
+    draft: &TreatmentDraft,
+    actual: &[VisitTreatment],
+    expected_row_id: Option<&str>,
+    expected_treatment_id: Option<&str>,
+) -> bool {
     actual.iter().any(|entry| {
-        expected_id
-            .map(|id| entry.id == id)
-            .unwrap_or_else(|| !baseline_ids.contains(entry.id.as_str()))
+        expected_row_id.is_some_and(|id| entry.id == id)
             && entry.tooth == draft.treatment.tooth
             && entry.diagnosis_id == draft.treatment.diagnosis_id
-            && entry.treatment_id == draft.treatment.treatment_id
+            && entry.treatment_id.as_deref() == expected_treatment_id
             && entry.note == draft.treatment.note
+            && entry.status == draft.treatment.status
+            && entry.is_milk_tooth == draft.treatment.is_milk_tooth
             && draft.procedures.iter().all(|expected| {
                 entry
                     .procedures
                     .iter()
-                    .any(|actual| actual.procedure_id == expected.procedure_id)
+                    .any(|actual| finalized_procedure_matches(expected, actual))
             })
     })
+}
+
+fn finalized_procedure_matches(expected: &ProcedureWrite, actual: &TreatmentProcedure) -> bool {
+    actual.id.as_deref().is_some_and(|id| !id.trim().is_empty())
+        && actual.procedure_id == expected.procedure_id
+        && json_scalar_matches(&actual.price, &expected.price)
+        && json_scalar_matches(&actual.discount, &expected.discount)
+}
+
+fn json_scalar_matches(actual: &serde_json::Value, expected: &str) -> bool {
+    let actual = match actual {
+        serde_json::Value::String(value) => value.as_str(),
+        serde_json::Value::Number(value) => {
+            return numeric_text_matches(&value.to_string(), expected)
+        }
+        _ => return false,
+    };
+    actual == expected || numeric_text_matches(actual, expected)
+}
+
+fn numeric_text_matches(left: &str, right: &str) -> bool {
+    match (left.parse::<f64>(), right.parse::<f64>()) {
+        (Ok(left), Ok(right)) => left.is_finite() && right.is_finite() && left == right,
+        _ => false,
+    }
 }
 
 fn normalized(values: &[VisitTreatment]) -> Vec<VisitTreatment> {
@@ -228,11 +269,33 @@ fn valid_tooth(value: &str) -> bool {
     let quadrant = number / 10;
     let position = number % 10;
     matches!(quadrant, 1..=4) && matches!(position, 1..=8)
-        || matches!(quadrant, 5..=8) && matches!(position, 1..=5)
 }
 
-fn is_milk_tooth(value: &str) -> bool {
-    value
+pub fn canonical_treatment_tooth(value: &str) -> Result<String, String> {
+    normalize_tooth(value, false).map(|(tooth, _)| tooth)
+}
+
+fn normalize_tooth(value: &str, is_milk_tooth: bool) -> Result<(String, bool), String> {
+    if value == "*" {
+        return if is_milk_tooth {
+            Err("Звездичката не може да бъде маркирана като млечен зъб.".into())
+        } else {
+            Ok((value.into(), false))
+        };
+    }
+    let number = value
         .parse::<u8>()
-        .is_ok_and(|number| matches!(number / 10, 5..=8))
+        .map_err(|_| "Невалиден номер на зъб.".to_string())?;
+    let quadrant = number / 10;
+    let position = number % 10;
+    if matches!(quadrant, 5..=8) && matches!(position, 1..=5) {
+        return Ok((format!("{}{}", quadrant - 4, position), true));
+    }
+    if !valid_tooth(value) {
+        return Err("Невалиден номер на зъб.".into());
+    }
+    if is_milk_tooth && position > 5 {
+        return Err("Този номер няма млечен зъб в AIDOO.".into());
+    }
+    Ok((value.into(), is_milk_tooth))
 }

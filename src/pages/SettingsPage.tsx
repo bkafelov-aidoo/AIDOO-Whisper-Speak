@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { isEnabled } from "@tauri-apps/plugin-autostart";
-import { AudioLines, Check, CircleArrowRight, CircleHelp, ExternalLink, FileText, FolderOpen, KeyRound, Languages, Link2, LoaderCircle, Mic, Power, RefreshCw, ShieldCheck, Unplug, X } from "lucide-react";
+import { AudioLines, Check, CircleArrowRight, CircleHelp, ExternalLink, FileText, FolderOpen, KeyRound, Languages, Link2, LoaderCircle, Mic, Power, RefreshCw, ShieldCheck, Square, Unplug, Volume2, X } from "lucide-react";
 import { errorMessage, translator } from "../i18n";
 import { type AppLanguage, type AppSettings, type BootstrapState, type MicrophoneProbe } from "../types";
 import { type ToastHandler } from "../ui-types";
@@ -14,6 +14,7 @@ import { WakeWordCalibrationDialog } from "../components/WakeWordCalibrationDial
 
 const SUPPORT_EMAIL_URL = "mailto:support@aidoo.bg";
 const DEFAULT_AIDOO_CLINIC_LINK = "https://app.aidoo.bg/clinics/<slug>/login";
+const LIVE_VOICES: AppSettings["liveVoice"][] = ["marin", "cedar", "coral", "sage", "alloy"];
 
 function savedAidooClinicLink(settings: AppSettings) {
   if (settings.aidooClinicUrl) return settings.aidooClinicUrl;
@@ -44,10 +45,13 @@ export function SettingsPage({ data, language, isBusy, onSave, onRefresh, onToas
   const [microphoneBusy, setMicrophoneBusy] = useState(false);
   const [accessibilityBusy, setAccessibilityBusy] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
+  const [voicePreview, setVoicePreview] = useState<{ voice: AppSettings["liveVoice"]; phase: "loading" | "playing" } | null>(null);
   const [calibrationOpen, setCalibrationOpen] = useState(false);
   const launchAtLoginDirty = useRef(false);
-  const controlsDisabled = isBusy || keyBusy || aidooBusy || shortcutBusy || diagnosticBusy || microphoneBusy || accessibilityBusy || saveBusy || calibrationOpen;
-  const shortcutButtonDisabled = isBusy || keyBusy || diagnosticBusy || microphoneBusy || accessibilityBusy || saveBusy;
+  const voiceAudio = useRef<{ context: AudioContext; source: AudioBufferSourceNode | null } | null>(null);
+  const voicePreviewGeneration = useRef(0);
+  const controlsDisabled = isBusy || keyBusy || aidooBusy || shortcutBusy || diagnosticBusy || microphoneBusy || accessibilityBusy || saveBusy || calibrationOpen || voicePreview !== null;
+  const shortcutButtonDisabled = isBusy || keyBusy || diagnosticBusy || microphoneBusy || accessibilityBusy || saveBusy || voicePreview !== null;
   const aidooIdentityChanged = aidooClinicLink.trim() !== savedAidooClinicLink(data.settings) || aidooEmail.trim() !== (data.settings.aidooEmail ?? "");
   useShortcutCapture(shortcutBusy, setShortcutBusy, (binding) => setDraft((current) => ({ ...current, dictationShortcut: binding })), (message) => onToast(errorMessage(message, language), "error"));
 
@@ -72,6 +76,57 @@ export function SettingsPage({ data, language, isBusy, onSave, onRefresh, onToas
       window.removeEventListener("focus", refreshLaunchAtLogin);
     };
   }, [data.settings.launchAtLogin]);
+
+  useEffect(() => () => {
+    voicePreviewGeneration.current += 1;
+    try { voiceAudio.current?.source?.stop(); } catch { /* The preview already ended. */ }
+    if (voiceAudio.current) void voiceAudio.current.context.close();
+    voiceAudio.current = null;
+  }, []);
+
+  const stopVoicePreview = () => {
+    voicePreviewGeneration.current += 1;
+    try { voiceAudio.current?.source?.stop(); } catch { /* The preview already ended. */ }
+    if (voiceAudio.current) void voiceAudio.current.context.close();
+    voiceAudio.current = null;
+    setVoicePreview(null);
+  };
+
+  const previewLiveVoice = async (voice: AppSettings["liveVoice"]) => {
+    if (voicePreview?.voice === voice) {
+      stopVoicePreview();
+      return;
+    }
+    stopVoicePreview();
+    const generation = voicePreviewGeneration.current;
+    const context = new AudioContext();
+    voiceAudio.current = { context, source: null };
+    setVoicePreview({ voice, phase: "loading" });
+    try {
+      await context.resume();
+      const bytes = await invoke<number[]>("preview_live_voice", { voice, language });
+      if (generation !== voicePreviewGeneration.current) return;
+      const buffer = await context.decodeAudioData(new Uint8Array(bytes).buffer);
+      if (generation !== voicePreviewGeneration.current) return;
+      const source = context.createBufferSource();
+      source.buffer = buffer;
+      source.connect(context.destination);
+      voiceAudio.current = { context, source };
+      const finish = () => {
+        if (generation !== voicePreviewGeneration.current) return;
+        void context.close();
+        voiceAudio.current = null;
+        setVoicePreview(null);
+      };
+      source.addEventListener("ended", finish, { once: true });
+      setVoicePreview({ voice, phase: "playing" });
+      source.start();
+    } catch (reason) {
+      if (generation !== voicePreviewGeneration.current) return;
+      stopVoicePreview();
+      onToast(errorMessage(reason, language), "error");
+    }
+  };
 
   const chooseFolder = async () => {
     try {
@@ -106,6 +161,7 @@ export function SettingsPage({ data, language, isBusy, onSave, onRefresh, onToas
     </SettingsSection>
     <SettingsSection icon={<Languages />} title={t("modelLanguage")}>
       <ModelPicker settings={draft} language={language} disabled={controlsDisabled} onChange={setDraft} />
+      <SettingRow title={t("liveVoice")} detail={t("liveVoiceHelp")}><div className="voice-picker" role="radiogroup" aria-label={t("liveVoice")}>{LIVE_VOICES.map((voice) => <div key={voice} className={`voice-option ${draft.liveVoice === voice ? "selected" : ""}`}><button type="button" role="radio" aria-checked={draft.liveVoice === voice} disabled={controlsDisabled} onClick={() => setDraft({ ...draft, liveVoice: voice })}><span>{voice}</span>{draft.liveVoice === voice && <Check aria-hidden="true" />}</button><button type="button" className="voice-preview-button" disabled={!data.hasApiKey || (controlsDisabled && voicePreview?.voice !== voice)} title={voicePreview?.voice === voice ? t("stopVoicePreview") : t("previewVoice")} aria-label={`${voicePreview?.voice === voice ? t("stopVoicePreview") : t("previewVoice")} ${voice}`} onClick={() => void previewLiveVoice(voice)}>{voicePreview?.voice === voice ? voicePreview.phase === "loading" ? <LoaderCircle className="spin" aria-hidden="true" /> : <Square aria-hidden="true" /> : <Volume2 aria-hidden="true" />}</button></div>)}</div></SettingRow>
       <SettingRow title={t("interfaceLanguage")}><select aria-label={t("interfaceLanguage")} value={draft.uiLanguage} disabled={controlsDisabled} onChange={(event) => setDraft({ ...draft, uiLanguage: event.target.value as AppSettings["uiLanguage"] })}><option value="auto">{t("automatic")}</option><option value="bg">Български</option><option value="en">English</option></select></SettingRow>
     </SettingsSection>
     <SettingsSection icon={<Mic />} title={t("microphone")}>

@@ -188,7 +188,7 @@ pub(super) fn wake_word_should_listen(state: &AppState) -> bool {
         .map(|status| status.as_str() == "idle")
         .unwrap_or(false);
     settings_ready
-        && (calibrating || (has_api_key && accessibility_granted()))
+        && (calibrating || has_api_key)
         && (calibrating || !has_recovery)
         && (calibrating || idle)
         && !state.operation_active.load(Ordering::Acquire)

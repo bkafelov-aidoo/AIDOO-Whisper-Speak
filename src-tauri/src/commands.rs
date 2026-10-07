@@ -68,7 +68,8 @@ pub(super) async fn create_live_session(
         return Err("GPT-Live режимът не е подготвен.".into());
     }
     let api_key = api_key_from_state(&state)?;
-    let answer = match live::create_session(&sdp, &api_key).await {
+    let live_voice = state.live_voice()?;
+    let answer = match live::create_session(&sdp, &api_key, &live_voice).await {
         Ok(answer) => answer,
         Err(error) => {
             release_live_session(&app, None);
@@ -159,6 +160,7 @@ pub(super) fn set_live_phase(
         feedback_sound::play(&app, sound);
     }
     let _ = app.emit("assistant:phase", &phase);
+    sync_main_window_for_live_phase(&app, &phase);
     if phase == "idle" {
         let recording_idle = state
             .recording_status
@@ -286,6 +288,7 @@ pub(super) fn bootstrap(app: AppHandle, state: State<'_, AppState>) -> Bootstrap
         aidoo_connected: state.aidoo.connected(),
         aidoo_connection_error,
         accessibility_granted: accessibility_granted(),
+        diagnostics_available: LIVE_DIAGNOSTICS_AVAILABLE,
         app_version: app.package_info().version.to_string(),
         default_output_directory: storage::default_output_dir().to_string_lossy().to_string(),
         recording: recording_snapshot(&state),
@@ -425,11 +428,6 @@ pub(super) async fn test_microphone(
     })
     .await
     .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
-pub(super) fn current_recording_snapshot(state: State<'_, AppState>) -> RecordingSnapshot {
-    recording_snapshot(&state)
 }
 
 #[tauri::command]
@@ -819,6 +817,7 @@ pub(super) fn diagnostic_settings(settings: &AppSettings) -> serde_json::Value {
         "uiLanguage": settings.ui_language,
         "language": settings.language,
         "model": settings.model,
+        "liveVoice": settings.live_voice,
         "autoPaste": settings.auto_paste,
         "saveAudio": settings.save_audio,
         "saveText": settings.save_text,

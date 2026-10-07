@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-interface FunctionCallItem {
+export interface FunctionCallItem {
   type?: string;
   call_id?: string;
   name?: string;
@@ -62,13 +62,41 @@ const COMMANDS: Record<string, { command: string; map: (value: Record<string, un
     command: "aidoo_start_status_visit",
     map: ({ patientId, isNzok }) => ({ patientId, isNzok }),
   },
-  apply_aidoo_status: {
-    command: "aidoo_apply_status",
-    map: ({ patientId, isNzok, change }) => ({ patientId, isNzok, change }),
+  apply_aidoo_statuses: {
+    command: "aidoo_apply_statuses",
+    map: ({ patientId, isNzok, changes }) => ({ patientId, isNzok, changes }),
   },
   finish_aidoo_status: {
     command: "aidoo_finish_status",
     map: ({ patientId }) => ({ patientId }),
+  },
+  read_aidoo_status: {
+    command: "aidoo_read_status",
+    map: ({ patientId }) => ({ patientId }),
+  },
+  read_aidoo_treatments: {
+    command: "aidoo_read_treatments",
+    map: ({ patientId }) => ({ patientId }),
+  },
+  read_aidoo_visits: {
+    command: "aidoo_read_visits",
+    map: ({ patientId }) => ({ patientId }),
+  },
+  read_aidoo_patient_data: {
+    command: "aidoo_read_patient_data",
+    map: ({ patientId, category }) => ({ patientId, category }),
+  },
+  begin_aidoo_treatment: {
+    command: "aidoo_begin_treatment",
+    map: ({ patientId }) => ({ patientId }),
+  },
+  select_aidoo_treatment_tooth: {
+    command: "aidoo_select_treatment_tooth",
+    map: ({ patientId, tooth }) => ({ patientId, tooth }),
+  },
+  create_aidoo_treatment: {
+    command: "aidoo_create_treatment",
+    map: ({ patientId, change }) => ({ patientId, change }),
   },
   add_aidoo_procedure: {
     command: "aidoo_add_procedure",

@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "live-diagnostics",
+  "description": "Development-only GPT-Live diagnostics window permissions",
+  "windows": ["live-diagnostics"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:event:allow-emit-to",
+    "allow-copy-text"
+  ]
+}

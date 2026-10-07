@@ -1,5 +1,9 @@
 use super::{
-    commands::show_patient_view, draft, presentation::PatientView, treatment, types, workflow,
+    commands::show_patient_view,
+    dental::spoken_tooth,
+    draft,
+    presentation::{self, PatientView},
+    treatment, treatment_diagnostics, types, workflow,
 };
 use crate::AppState;
 use tauri::{AppHandle, State};
@@ -11,7 +15,7 @@ pub(crate) fn aidoo_select_patient(
     state: State<'_, AppState>,
 ) -> Result<types::PatientSummary, String> {
     let patient = state.aidoo.select_patient(&patient_id)?;
-    show_patient_view(&app, &state, &patient.id, PatientView::Status);
+    let _ = show_patient_view(&app, &state, &patient.id, PatientView::Treatment);
     Ok(patient)
 }
 
@@ -21,7 +25,7 @@ pub(crate) fn aidoo_next_patient(
     state: State<'_, AppState>,
 ) -> Result<types::PatientSummary, String> {
     let patient = state.aidoo.select_next_patient()?;
-    show_patient_view(&app, &state, &patient.id, PatientView::Status);
+    let _ = show_patient_view(&app, &state, &patient.id, PatientView::Treatment);
     Ok(patient)
 }
 
@@ -36,22 +40,120 @@ pub(crate) async fn aidoo_begin_status(
     let result = client
         .active_visit(&session.token, &session.clinic_id, &patient_id)
         .await;
-    show_patient_view(&app, &state, &patient_id, PatientView::Status);
-    match result {
-        Ok(visit) if !visit.is_finished && !visit.cancelled => Ok(types::StatusEntryState {
-            ready: true,
-            needs_visit: false,
-            message: "Статусът е готов за попълване.".into(),
-        }),
-        Err(error) if error.is_not_found() => Ok(types::StatusEntryState {
-            ready: false,
-            needs_visit: true,
-            message: "Няма активно посещение. Попитайте само дали приемът е частен или по НЗОК."
-                .into(),
-        }),
-        Ok(_) => Err("Няма активно посещение за попълване на статус.".into()),
-        Err(error) => Err(error.message),
+    let entry = match result {
+        Ok(visit) if !visit.is_finished && !visit.cancelled => {
+            state.aidoo.clear_nzok_choice();
+            types::StatusEntryState {
+                ready: true,
+                needs_visit: false,
+                funding_choice_required: false,
+                nzok_available: false,
+                message: "Статусът е готов за попълване.".into(),
+            }
+        }
+        Err(error) if error.is_not_found() => {
+            if session.works_with_nzok
+                && nzok_status_available(&client, &session, &patient_id).await?
+            {
+                state.aidoo.remember_nzok_choice(&patient_id)?;
+                types::StatusEntryState {
+                    ready: false,
+                    needs_visit: true,
+                    funding_choice_required: true,
+                    nzok_available: true,
+                    message: "Няма активно посещение. Попитайте само: „По НЗОК или частно?“".into(),
+                }
+            } else {
+                state.aidoo.clear_nzok_choice();
+                workflow::create_status_visit(
+                    &client,
+                    &session.token,
+                    &session.clinic_id,
+                    &patient_id,
+                    &session.doctor_id,
+                    false,
+                )
+                .await
+                .map_err(|error| error.message)?;
+                types::StatusEntryState {
+                    ready: true,
+                    needs_visit: false,
+                    funding_choice_required: false,
+                    nzok_available: false,
+                    message: "Започнах частно посещение. Статусът е готов за попълване.".into(),
+                }
+            }
+        }
+        Ok(_) => return Err("Няма активно посещение за попълване на статус.".into()),
+        Err(error) => return Err(error.message),
+    };
+    let _ = show_patient_view(&app, &state, &patient_id, PatientView::Status);
+    Ok(entry)
+}
+
+#[tauri::command]
+pub(crate) async fn aidoo_begin_treatment(
+    patient_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<types::ClinicalWriteResult, String> {
+    state.aidoo.selected_patient(&patient_id)?;
+    let session = state.aidoo.session()?;
+    let client = state.aidoo.client()?;
+    let result = workflow::create_treatment_visit(
+        &client,
+        &session.token,
+        &session.clinic_id,
+        &patient_id,
+        &session.doctor_id,
+    )
+    .await
+    .map_err(|error| treatment_diagnostics::failure("begin_visit", error))?;
+    treatment_diagnostics::verification("begin_visit", &result.verification);
+    let verified = result.visit.is_some()
+        && matches!(
+            result.verification.outcome,
+            types::VerificationOutcome::Verified
+                | types::VerificationOutcome::VerifiedAfterAmbiguousWrite
+        );
+    if !verified {
+        let spoken_summary = result.verification.message.clone();
+        return Ok(types::ClinicalWriteResult {
+            spoken_summary,
+            verification: result.verification,
+            visible_in_browser: false,
+            presentation_error: None,
+        });
     }
+
+    let presentation = show_patient_view(&app, &state, &patient_id, PatientView::Treatment);
+    treatment_diagnostics::presentation(&presentation);
+    let presentation_error = presentation.err();
+    let spoken_summary = if presentation_error.is_some() {
+        "Посещението е готово, но картонът не се опресни на екрана.".into()
+    } else if result.created {
+        "Създадох новото посещение. Отварям Лечение.".into()
+    } else {
+        "Отварям активното Лечение.".into()
+    };
+    Ok(types::ClinicalWriteResult {
+        spoken_summary,
+        verification: result.verification,
+        visible_in_browser: presentation_error.is_none(),
+        presentation_error,
+    })
+}
+
+#[tauri::command]
+pub(crate) fn aidoo_select_treatment_tooth(
+    patient_id: String,
+    tooth: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<types::TreatmentToothSelectionResult, String> {
+    let tooth = selected_treatment_tooth(&state.aidoo, &patient_id, &tooth)?;
+    presentation::present_treatment_tooth(&app, &state, patient_id, tooth.clone())?;
+    Ok(treatment_tooth_selection_result(tooth))
 }
 
 #[tauri::command]
@@ -63,6 +165,19 @@ pub(crate) async fn aidoo_start_status_visit(
 ) -> Result<types::StatusVisitResult, String> {
     let session = state.aidoo.session()?;
     let client = state.aidoo.client()?;
+    if is_nzok {
+        if !session.works_with_nzok {
+            return Err("Тази клиника не работи с НЗОК. Започнете частно посещение.".into());
+        }
+        let checked_by_begin = state.aidoo.take_nzok_choice(&patient_id)?;
+        if !checked_by_begin && !nzok_status_available(&client, &session, &patient_id).await? {
+            return Err(
+                "Не може да се започне статус по НЗОК: за годината вече има отчетена 101.".into(),
+            );
+        }
+    } else {
+        state.aidoo.clear_nzok_choice();
+    }
     let result = workflow::create_status_visit(
         &client,
         &session.token,
@@ -72,7 +187,7 @@ pub(crate) async fn aidoo_start_status_visit(
         is_nzok,
     )
     .await;
-    show_patient_view(&app, &state, &patient_id, PatientView::Status);
+    let _ = show_patient_view(&app, &state, &patient_id, PatientView::Status);
     result.map_err(|error| error.message)
 }
 
@@ -84,6 +199,30 @@ pub(crate) async fn aidoo_apply_status(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<types::ClinicalWriteResult, String> {
+    apply_status_changes(patient_id, is_nzok, vec![change], &app, &state).await
+}
+
+#[tauri::command]
+pub(crate) async fn aidoo_apply_statuses(
+    patient_id: String,
+    is_nzok: bool,
+    changes: Vec<types::SpokenStatusChange>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<types::ClinicalWriteResult, String> {
+    apply_status_changes(patient_id, is_nzok, changes, &app, &state).await
+}
+
+async fn apply_status_changes(
+    patient_id: String,
+    is_nzok: bool,
+    changes: Vec<types::SpokenStatusChange>,
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<types::ClinicalWriteResult, String> {
+    if changes.is_empty() {
+        return Err("Липсват статусни промени за запис.".into());
+    }
     let session = state.aidoo.session()?;
     let client = state.aidoo.client()?;
     let visit = client
@@ -109,41 +248,115 @@ pub(crate) async fn aidoo_apply_status(
         .await
         .map(draft::editable_status_catalog)
         .map_err(|error| error.message)?;
-    let status = resolve_status(&catalog, &change.status)?;
-    let existing_status_id = change
-        .replace_status
-        .as_deref()
-        .map(|query| resolve_status(&catalog, query).map(|entry| entry.id.clone()))
-        .transpose()?;
-    let operation = if existing_status_id.is_some() {
-        types::StatusOperation::Replace
-    } else {
-        types::StatusOperation::Add
-    };
+    let resolved_changes = changes
+        .into_iter()
+        .map(|change| {
+            let status_id = resolve_status(&catalog, &change.status)?.id.clone();
+            let existing_status_id = change
+                .replace_status
+                .as_deref()
+                .map(|query| resolve_status(&catalog, query).map(|entry| entry.id.clone()))
+                .transpose()?;
+            let operation = if existing_status_id.is_some() {
+                types::StatusOperation::Replace
+            } else {
+                types::StatusOperation::Add
+            };
+            Ok(types::StatusChange {
+                operation,
+                tooth: change.tooth,
+                status_id,
+                regions: change.regions,
+                existing_status_id,
+                is_milk_tooth: change.is_milk_tooth,
+                for_observation: change.for_observation,
+                note: change.note,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let draft = draft::build_draft(
         patient_id.clone(),
         &visit,
         is_nzok,
         baseline,
         &catalog,
-        &[types::StatusChange {
-            operation,
-            tooth: change.tooth,
-            status_id: status.id.clone(),
-            regions: change.regions,
-            existing_status_id,
-            is_milk_tooth: change.is_milk_tooth,
-            for_observation: change.for_observation,
-            note: change.note,
-        }],
+        &resolved_changes,
     )?;
     let result =
         workflow::apply_confirmed_draft(&client, &session.token, &session.clinic_id, &draft).await;
-    show_patient_view(&app, &state, &patient_id, PatientView::Status);
-    Ok(clinical_result(
+    let verification = result.map_err(|error| error.message)?;
+    let presentation = show_patient_view(app, state, &patient_id, PatientView::Status);
+    Ok(status_clinical_result(
         &draft.spoken_summary,
-        result.map_err(|error| error.message)?,
+        verification,
+        presentation,
     ))
+}
+
+#[tauri::command]
+pub(crate) async fn aidoo_create_treatment(
+    patient_id: String,
+    change: types::SpokenTreatmentChange,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<types::ClinicalWriteResult, String> {
+    let session = state.aidoo.session()?;
+    let client = state.aidoo.client()?;
+    let visit = active_treatment_visit(&state.aidoo, &client, &session, &patient_id).await?;
+    let baseline = client
+        .visit_treatments(&session.token, &session.clinic_id, &patient_id, &visit.id)
+        .await
+        .map_err(|error| treatment_diagnostics::failure("read_rows", error))?;
+    let diagnoses = if change.diagnosis.is_some() {
+        client
+            .diagnosis_catalog(&session.token, &session.clinic_id)
+            .await
+            .map_err(|error| treatment_diagnostics::failure("diagnosis_catalog", error))?
+    } else {
+        Vec::new()
+    };
+    let procedures = if change.procedures.is_empty() {
+        Vec::new()
+    } else {
+        client
+            .procedure_catalog(
+                &session.token,
+                &session.clinic_id,
+                session.current_currency.as_deref(),
+            )
+            .await
+            .map_err(|error| treatment_diagnostics::failure("procedure_catalog", error))?
+    };
+    let diagnosis_id = change
+        .diagnosis
+        .as_deref()
+        .map(|query| resolve_diagnosis(&diagnoses, query).map(|entry| entry.id.clone()))
+        .transpose()?;
+    let procedure_ids = change
+        .procedures
+        .iter()
+        .map(|query| resolve_procedure(&procedures, query).map(|entry| entry.id.clone()))
+        .collect::<Result<Vec<_>, _>>()?;
+    apply_treatment_change(
+        &app,
+        &state,
+        &session,
+        &client,
+        patient_id,
+        visit,
+        baseline,
+        diagnoses,
+        procedures,
+        types::TreatmentChange {
+            tooth: spoken_treatment_tooth(&change.tooth, change.is_milk_tooth)?,
+            existing_treatment_id: None,
+            diagnosis_id,
+            treatment_id: None,
+            note: change.note,
+            procedure_ids,
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -152,7 +365,7 @@ pub(crate) fn aidoo_finish_status(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> String {
-    show_patient_view(&app, &state, &patient_id, PatientView::Treatment);
+    let _ = show_patient_view(&app, &state, &patient_id, PatientView::Treatment);
     "Статусът е записан. Отварям Лечение.".into()
 }
 
@@ -167,11 +380,11 @@ pub(crate) async fn aidoo_add_procedure(
 ) -> Result<types::ClinicalWriteResult, String> {
     let session = state.aidoo.session()?;
     let client = state.aidoo.client()?;
-    let visit = active_treatment_visit(&client, &session, &patient_id).await?;
+    let visit = active_treatment_visit(&state.aidoo, &client, &session, &patient_id).await?;
     let baseline = client
         .visit_treatments(&session.token, &session.clinic_id, &patient_id, &visit.id)
         .await
-        .map_err(|error| error.message)?;
+        .map_err(|error| treatment_diagnostics::failure("read_rows", error))?;
     let procedures = client
         .procedure_catalog(
             &session.token,
@@ -179,7 +392,7 @@ pub(crate) async fn aidoo_add_procedure(
             session.current_currency.as_deref(),
         )
         .await
-        .map_err(|error| error.message)?;
+        .map_err(|error| treatment_diagnostics::failure("procedure_catalog", error))?;
     let procedure_id = resolve_procedure(&procedures, &procedure)?.id.clone();
     let row = resolve_treatment_row(&baseline, &tooth, existing_treatment_id.as_deref())?;
     apply_treatment_change(
@@ -215,15 +428,15 @@ pub(crate) async fn aidoo_write_diagnosis(
 ) -> Result<types::ClinicalWriteResult, String> {
     let session = state.aidoo.session()?;
     let client = state.aidoo.client()?;
-    let visit = active_treatment_visit(&client, &session, &patient_id).await?;
+    let visit = active_treatment_visit(&state.aidoo, &client, &session, &patient_id).await?;
     let baseline = client
         .visit_treatments(&session.token, &session.clinic_id, &patient_id, &visit.id)
         .await
-        .map_err(|error| error.message)?;
+        .map_err(|error| treatment_diagnostics::failure("read_rows", error))?;
     let diagnoses = client
         .diagnosis_catalog(&session.token, &session.clinic_id)
         .await
-        .map_err(|error| error.message)?;
+        .map_err(|error| treatment_diagnostics::failure("diagnosis_catalog", error))?;
     let diagnosis_id = resolve_diagnosis(&diagnoses, &diagnosis)?.id.clone();
     let row = resolve_treatment_row(&baseline, &tooth, existing_treatment_id.as_deref())?;
     apply_treatment_change(
@@ -259,11 +472,11 @@ pub(crate) async fn aidoo_write_official_note(
 ) -> Result<types::ClinicalWriteResult, String> {
     let session = state.aidoo.session()?;
     let client = state.aidoo.client()?;
-    let visit = active_treatment_visit(&client, &session, &patient_id).await?;
+    let visit = active_treatment_visit(&state.aidoo, &client, &session, &patient_id).await?;
     let baseline = client
         .visit_treatments(&session.token, &session.clinic_id, &patient_id, &visit.id)
         .await
-        .map_err(|error| error.message)?;
+        .map_err(|error| treatment_diagnostics::failure("read_rows", error))?;
     let row = resolve_treatment_row(&baseline, &tooth, existing_treatment_id.as_deref())?;
     apply_treatment_change(
         &app,
@@ -287,15 +500,93 @@ pub(crate) async fn aidoo_write_official_note(
     .await
 }
 
+async fn nzok_status_available(
+    client: &super::client::AidooClient,
+    session: &super::runtime::AidooSessionSnapshot,
+    patient_id: &str,
+) -> Result<bool, String> {
+    let xml = client
+        .nzis_status_search_xml(&session.token, &session.clinic_id, patient_id)
+        .await
+        .map_err(|error| error.message)?;
+    let signed_xml = client
+        .sign_nzis_xml(&xml)
+        .await
+        .map_err(|error| error.message)?;
+    let patient = client
+        .patient_details(&session.token, &session.clinic_id, patient_id)
+        .await
+        .map_err(|error| error.message)?;
+    let identifier = patient
+        .identifier
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Пациентът няма идентификатор за НЗОК проверка.".to_string())?;
+    let person_type = patient
+        .identifier_type
+        .as_deref()
+        .and_then(nzok_person_type)
+        .ok_or_else(|| {
+            "Пациентът няма поддържан тип идентификатор за НЗОК проверка.".to_string()
+        })?;
+    let nzok_data = client
+        .nhif_four_year_data(identifier, person_type)
+        .await
+        .map_err(|error| error.message)?;
+    client
+        .has_available_status_check(&session.token, &session.clinic_id, &signed_xml, &nzok_data)
+        .await
+        .map_err(|error| error.message)
+}
+
+fn nzok_person_type(value: &str) -> Option<&'static str> {
+    match value.trim() {
+        "1" | "ЕГН" => Some("1"),
+        "2" | "ЛНЧ" => Some("2"),
+        "3" | "Социален номер - за чужди граждани" => Some("3"),
+        "4" | "Номер на паспорт" => Some("4"),
+        _ => None,
+    }
+}
+
+fn spoken_treatment_tooth(value: &str, is_milk_tooth: bool) -> Result<String, String> {
+    if !is_milk_tooth {
+        return Ok(value.into());
+    }
+    let number = value
+        .parse::<u8>()
+        .map_err(|_| "Млечният зъб трябва да има валиден FDI номер.".to_string())?;
+    let quadrant = number / 10;
+    let position = number % 10;
+    if matches!(quadrant, 5..=8) && matches!(position, 1..=5) {
+        return Ok(value.into());
+    }
+    if matches!(quadrant, 1..=4) && matches!(position, 1..=5) {
+        return Ok((number + 40).to_string());
+    }
+    Err("Този номер няма млечен зъб в AIDOO.".into())
+}
+
+fn selected_treatment_tooth(
+    runtime: &super::runtime::AidooRuntime,
+    patient_id: &str,
+    tooth: &str,
+) -> Result<String, String> {
+    runtime.selected_patient(patient_id)?;
+    treatment::canonical_treatment_tooth(tooth)
+}
+
 async fn active_treatment_visit(
+    runtime: &super::runtime::AidooRuntime,
     client: &super::client::AidooClient,
     session: &super::runtime::AidooSessionSnapshot,
     patient_id: &str,
 ) -> Result<types::Visit, String> {
+    runtime.selected_patient(patient_id)?;
     let visit = client
         .active_visit(&session.token, &session.clinic_id, patient_id)
         .await
-        .map_err(|error| error.message)?;
+        .map_err(|error| treatment_diagnostics::failure("active_visit", error))?;
     if visit.is_finished || visit.cancelled {
         return Err("Няма активно посещение за запис в Лечение.".into());
     }
@@ -330,30 +621,90 @@ async fn apply_treatment_change(
         &draft,
     )
     .await;
-    show_patient_view(app, state, &patient_id, PatientView::Treatment);
+    let verification =
+        result.map_err(|error| treatment_diagnostics::failure("apply_change", error))?;
+    treatment_diagnostics::verification("apply_change", &verification);
+    let presentation = presentation::present_treatment_tooth(
+        app,
+        state,
+        patient_id,
+        draft.treatment.tooth.clone(),
+    );
+    treatment_diagnostics::presentation(&presentation);
     Ok(clinical_result(
         &draft.spoken_summary,
-        result.map_err(|error| error.message)?,
+        verification,
+        presentation,
     ))
 }
 
 fn clinical_result(
     draft_summary: &str,
     verification: types::VerificationResult,
+    presentation: Result<(), String>,
 ) -> types::ClinicalWriteResult {
-    let spoken_summary = if matches!(
+    let write_verified = matches!(
         verification.outcome,
         types::VerificationOutcome::Verified
             | types::VerificationOutcome::VerifiedAfterAmbiguousWrite
-    ) {
+    );
+    let presentation_error = presentation.err();
+    let spoken_summary = if write_verified && presentation_error.is_none() {
         completed_summary(draft_summary)
+    } else if write_verified {
+        "Записано е, но картонът не се опресни на екрана.".into()
     } else {
         verification.message.clone()
     };
     types::ClinicalWriteResult {
         spoken_summary,
         verification,
+        visible_in_browser: presentation_error.is_none(),
+        presentation_error,
     }
+}
+
+fn treatment_tooth_selection_result(tooth: String) -> types::TreatmentToothSelectionResult {
+    let spoken_summary = if tooth == "*" {
+        "Показвам общите процедури.".into()
+    } else {
+        format!("Показвам зъб {}.", spoken_tooth(&tooth))
+    };
+    types::TreatmentToothSelectionResult {
+        tooth,
+        spoken_summary,
+        visible_in_browser: true,
+    }
+}
+
+fn status_clinical_result(
+    draft_summary: &str,
+    verification: types::VerificationResult,
+    presentation: Result<(), String>,
+) -> types::ClinicalWriteResult {
+    let write_verified = matches!(
+        verification.outcome,
+        types::VerificationOutcome::Verified
+            | types::VerificationOutcome::VerifiedAfterAmbiguousWrite
+    );
+    let mut result = clinical_result(draft_summary, verification, presentation);
+    if write_verified && result.visible_in_browser {
+        result.spoken_summary = completed_status_summary(draft_summary);
+    } else if !write_verified {
+        result.spoken_summary = "Повтори.".into();
+    }
+    result
+}
+
+fn completed_status_summary(value: &str) -> String {
+    let value = value
+        .strip_prefix("Ще ")
+        .unwrap_or(value)
+        .strip_suffix(". Да го запиша ли?")
+        .unwrap_or(value)
+        .replace("добавя ", "")
+        .replace("заменя със ", "");
+    format!("Записах: {value}.")
 }
 
 fn completed_summary(value: &str) -> String {
@@ -452,20 +803,25 @@ fn resolve_treatment_row(
     tooth: &str,
     explicit_id: Option<&str>,
 ) -> Result<Option<String>, String> {
+    let body = treatment::canonical_treatment_tooth(tooth)?;
+    let explicitly_milk = tooth
+        .trim()
+        .as_bytes()
+        .first()
+        .is_some_and(|quadrant| (b'5'..=b'8').contains(quadrant));
+    let matches_tooth =
+        |row: &&types::VisitTreatment| row.tooth == body && row.is_milk_tooth == explicitly_milk;
     if let Some(id) = explicit_id {
         let row = entries
             .iter()
             .find(|entry| entry.id == id)
             .ok_or_else(|| "Избраният ред за лечение вече не съществува.".to_string())?;
-        if row.tooth != tooth {
-            return Err("Избраният ред за лечение е за друг зъб.".into());
+        if !matches_tooth(&row) {
+            return Err("Избраният ред за лечение е за друг зъб или не е млечен.".into());
         }
         return Ok(Some(id.to_string()));
     }
-    let matches = entries
-        .iter()
-        .filter(|entry| entry.tooth == tooth)
-        .collect::<Vec<_>>();
+    let matches = entries.iter().filter(matches_tooth).collect::<Vec<_>>();
     match matches.as_slice() {
         [] => Ok(None),
         [entry] => Ok(Some(entry.id.clone())),
@@ -475,77 +831,16 @@ fn resolve_treatment_row(
             if tooth == "*" {
                 "звездичката".into()
             } else {
-                format!("зъб {tooth}")
+                format!("зъб {}", spoken_tooth(tooth))
             }
         )),
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+#[path = "tests/treatment_selection.rs"]
+mod treatment_selection_tests;
 
-    #[test]
-    fn catalog_matching_accepts_full_name_code_and_one_unique_partial() {
-        let entries = vec![
-            types::ProcedureCatalogEntry {
-                id: "one".into(),
-                name: "Професионално почистване".into(),
-                key: "PROC-1".into(),
-                price: serde_json::json!(10),
-                price_currency: Some("BGN".into()),
-            },
-            types::ProcedureCatalogEntry {
-                id: "two".into(),
-                name: "Обтурация".into(),
-                key: "PROC-2".into(),
-                price: serde_json::json!(20),
-                price_currency: Some("BGN".into()),
-            },
-        ];
-        assert_eq!(resolve_procedure(&entries, "proc 1").unwrap().id, "one");
-        assert_eq!(resolve_procedure(&entries, "обтурац").unwrap().id, "two");
-        assert!(resolve_procedure(&entries, "липсваща").is_err());
-    }
-
-    #[test]
-    fn treatment_row_is_automatic_only_when_unambiguous() {
-        let row = |id: &str| types::VisitTreatment {
-            id: id.into(),
-            tooth: "16".into(),
-            diagnosis_id: None,
-            treatment_id: None,
-            note: None,
-            status: None,
-            is_milk_tooth: false,
-            procedures: Vec::new(),
-        };
-        assert_eq!(resolve_treatment_row(&[], "16", None).unwrap(), None);
-        assert_eq!(
-            resolve_treatment_row(&[row("one")], "16", None).unwrap(),
-            Some("one".into())
-        );
-        assert!(resolve_treatment_row(&[row("one"), row("two")], "16", None).is_err());
-    }
-
-    #[test]
-    fn spoken_result_claims_saved_only_after_verified_read_back() {
-        let verified = clinical_result(
-            "Ще запиша кариес на зъб 16. Да го запиша ли?",
-            types::VerificationResult {
-                outcome: types::VerificationOutcome::Verified,
-                message: "verified".into(),
-            },
-        );
-        assert_eq!(verified.spoken_summary, "Записано: кариес на зъб 16.");
-
-        let rejected = clinical_result(
-            "Ще запиша кариес на зъб 16. Да го запиша ли?",
-            types::VerificationResult {
-                outcome: types::VerificationOutcome::Rejected,
-                message: "Записът не е потвърден.".into(),
-            },
-        );
-        assert_eq!(rejected.spoken_summary, "Записът не е потвърден.");
-    }
-}
+#[cfg(test)]
+#[path = "tests/protocol.rs"]
+mod tests;

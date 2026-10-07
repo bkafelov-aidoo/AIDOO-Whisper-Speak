@@ -1,9 +1,13 @@
 use super::client::AidooClient;
 use super::draft::{build_draft, editable_status_catalog, verifies};
-use super::treatment::{build_treatment_draft, same_treatment_snapshot, verifies_treatment};
+use super::treatment::{
+    build_treatment_draft, same_treatment_snapshot, verifies_treatment,
+    verifies_treatment_with_identity,
+};
 use super::types::*;
 use super::workflow::{
     apply_confirmed_draft, apply_confirmed_treatment_draft, create_status_visit,
+    create_treatment_visit,
 };
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -13,6 +17,8 @@ use std::time::Duration;
 
 mod edge_cases;
 mod schedule_contract;
+mod status_edit;
+mod treatment_visit;
 
 fn catalog() -> Vec<StatusCatalogEntry> {
     vec![
@@ -107,7 +113,7 @@ fn surface_add_builds_the_observed_aidoo_payload() {
     assert_eq!(draft.writes[0].regions, ["OCCLUSAL"]);
     assert!(!draft.writes[0].is_milk_tooth);
     assert!(!draft.writes[0].for_observation);
-    assert!(draft.spoken_summary.contains("зъб 32"));
+    assert!(draft.spoken_summary.contains("зъб три две"));
 }
 
 #[test]
@@ -649,7 +655,7 @@ async fn treatment_workflow_reads_before_writes_and_verifies_every_field() {
         ResponseScript::json(200, &after_without_procedure),
         ResponseScript::json(
             200,
-            r#"{"procedure":{"id":"joined-id","procedureId":"procedure-id","price":"42.5","discount":"0"},"treatmentId":"treatment-row"}"#,
+            r#"{"procedure":{"id":"joined-id","procedureId":"procedure-id","price":"42.5","discount":"0"}}"#,
         ),
         ResponseScript::json(200, &format!("[{after}]")),
     ]);

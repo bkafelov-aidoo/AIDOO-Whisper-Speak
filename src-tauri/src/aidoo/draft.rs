@@ -1,4 +1,7 @@
-use super::types::*;
+use super::{
+    dental::{display_tooth, spoken_tooth},
+    types::*,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub fn build_draft(
@@ -22,16 +25,49 @@ pub fn build_draft(
     let normalized_changes = changes
         .iter()
         .cloned()
-        .map(|mut change| {
+        .map(|mut change| -> Result<StatusChange, String> {
+            let (tooth, is_milk_tooth) = normalize_tooth(&change.tooth, change.is_milk_tooth)?;
+            change.tooth = tooth;
+            change.is_milk_tooth = is_milk_tooth;
             change.regions = normalize_regions(&change.regions);
-            change
+            Ok(change)
         })
-        .collect::<Vec<_>>();
-    let mut state = status_map(&baseline);
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut state = status_map(&baseline)?;
+    let baseline_state = state.clone();
     let mut touched = BTreeSet::new();
+    let mut replacement_sources = vec![None; normalized_changes.len()];
+    let mut consumed_sources = BTreeSet::new();
+
+    for (index, change) in normalized_changes.iter().enumerate() {
+        validate_change(change, &catalog_by_id)?;
+        if change.operation == StatusOperation::Replace {
+            let existing = change
+                .existing_status_id
+                .as_ref()
+                .ok_or_else(|| "При замяна трябва да е посочен текущият статус.".to_string())?;
+            let source = resolve_replacement_source(&baseline_state, change, existing)?;
+            if !consumed_sources.insert((source.clone(), existing.clone())) {
+                return Err("Един и същ текущ статус е посочен за повече от една замяна.".into());
+            }
+            replacement_sources[index] = Some(source);
+        }
+    }
+
+    for (change, source) in normalized_changes.iter().zip(&replacement_sources) {
+        let Some(source) = source else { continue };
+        let existing = change
+            .existing_status_id
+            .as_ref()
+            .ok_or_else(|| "При замяна трябва да е посочен текущият статус.".to_string())?;
+        let entry = state
+            .get_mut(source)
+            .ok_or_else(|| "Липсва текущ статус за замяна.".to_string())?;
+        entry.statuses.retain(|status| status != existing);
+        touched.insert(source.clone());
+    }
 
     for change in &normalized_changes {
-        validate_change(change, &catalog_by_id)?;
         let regions = sorted_unique(&change.regions);
         let key = (change.tooth.clone(), regions.clone());
         state
@@ -44,22 +80,6 @@ pub fn build_draft(
                 regions: regions.clone(),
                 note: change.note.clone(),
             });
-        match change.operation {
-            StatusOperation::Add => {}
-            StatusOperation::Replace => {
-                let existing = change
-                    .existing_status_id
-                    .as_ref()
-                    .ok_or_else(|| "При замяна трябва да е посочен текущият статус.".to_string())?;
-                let entry = state
-                    .get_mut(&key)
-                    .ok_or_else(|| "Липсва текущ статус за замяна.".to_string())?;
-                if !entry.statuses.iter().any(|status| status == existing) {
-                    return Err("Статусът за замяна вече не присъства в текущия запис.".into());
-                }
-                entry.statuses.retain(|status| status != existing);
-            }
-        }
         ensure_status_compatible(&state, change, &catalog_by_id)?;
         let entry = state
             .get_mut(&key)
@@ -100,11 +120,16 @@ pub fn editable_status_catalog(entries: Vec<StatusCatalogEntry>) -> Vec<StatusCa
 }
 
 pub fn same_snapshot(left: &[ToothStatus], right: &[ToothStatus]) -> bool {
-    normalized_snapshot(left) == normalized_snapshot(right)
+    match (normalized_snapshot(left), normalized_snapshot(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 pub fn verifies(writes: &[ToothStatusWrite], actual: &[ToothStatus]) -> bool {
-    let actual = status_map(actual);
+    let Ok(actual) = status_map(actual) else {
+        return false;
+    };
     writes.iter().all(|expected| {
         let key = (expected.tooth.clone(), sorted_unique(&expected.regions));
         actual.get(&key).is_some_and(|found| {
@@ -118,8 +143,43 @@ pub fn verifies(writes: &[ToothStatusWrite], actual: &[ToothStatus]) -> bool {
 
 fn normalized_snapshot(
     values: &[ToothStatus],
-) -> BTreeMap<(String, Vec<String>), ToothStatusWrite> {
+) -> Result<BTreeMap<(String, Vec<String>), ToothStatusWrite>, String> {
     status_map(values)
+}
+
+fn resolve_replacement_source(
+    state: &BTreeMap<(String, Vec<String>), ToothStatusWrite>,
+    change: &StatusChange,
+    existing_status_id: &str,
+) -> Result<(String, Vec<String>), String> {
+    let destination = (change.tooth.clone(), sorted_unique(&change.regions));
+    if state.get(&destination).is_some_and(|entry| {
+        entry
+            .statuses
+            .iter()
+            .any(|status| status == existing_status_id)
+    }) {
+        return Ok(destination);
+    }
+    let candidates = state
+        .iter()
+        .filter(|((tooth, _), entry)| {
+            tooth == &change.tooth
+                && entry
+                    .statuses
+                    .iter()
+                    .any(|status| status == existing_status_id)
+        })
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [] => Err("Статусът за замяна вече не присъства в текущия запис.".into()),
+        [source] => Ok(source.clone()),
+        _ => Err(
+            "Статусът за замяна присъства на повече от една повърхност. Посочете точната повърхност."
+                .into(),
+        ),
+    }
 }
 
 fn validate_change(
@@ -162,9 +222,6 @@ fn validate_change(
     {
         return Err("Избраната повърхност не е разрешена за този AIDOO статус.".into());
     }
-    if change.regions.is_empty() && change.is_milk_tooth && !is_milk_tooth(&change.tooth) {
-        return Err("Постоянен зъб не може да бъде маркиран като временен.".into());
-    }
     Ok(())
 }
 
@@ -199,7 +256,9 @@ fn ensure_status_compatible(
         {
             return Err(format!(
                 "Статусите „{}“ и „{}“ са несъвместими за зъб {}.",
-                candidate.name, existing.name, change.tooth
+                candidate.name,
+                existing.name,
+                spoken_tooth(&display_tooth(&change.tooth, change.is_milk_tooth))
             ));
         }
     }
@@ -229,13 +288,31 @@ fn valid_tooth(value: &str) -> bool {
     let quadrant = number / 10;
     let position = number % 10;
     matches!(quadrant, 1..=4) && matches!(position, 1..=8)
-        || matches!(quadrant, 5..=8) && matches!(position, 1..=5)
 }
 
-fn is_milk_tooth(value: &str) -> bool {
-    value
+fn normalize_tooth(value: &str, is_milk_tooth: bool) -> Result<(String, bool), String> {
+    if value == "*" {
+        return if is_milk_tooth {
+            Err("Звездичката не може да бъде маркирана като млечен зъб.".into())
+        } else {
+            Ok((value.into(), false))
+        };
+    }
+    let number = value
         .parse::<u8>()
-        .is_ok_and(|number| matches!(number / 10, 5..=8))
+        .map_err(|_| "Невалиден номер на зъб.".to_string())?;
+    let quadrant = number / 10;
+    let position = number % 10;
+    if matches!(quadrant, 5..=8) && matches!(position, 1..=5) {
+        return Ok((format!("{}{}", quadrant - 4, position), true));
+    }
+    if !matches!(quadrant, 1..=4) || !matches!(position, 1..=8) {
+        return Err("Невалиден номер на зъб.".into());
+    }
+    if is_milk_tooth && position > 5 {
+        return Err("Този номер няма млечен зъб в AIDOO.".into());
+    }
+    Ok((value.into(), is_milk_tooth))
 }
 
 fn spoken_summary(
@@ -260,7 +337,15 @@ fn spoken_summary(
             StatusOperation::Add => "добавя",
             StatusOperation::Replace => "заменя със",
         };
-        parts.push(format!("{verb} {name}{surface} на зъб {}", change.tooth));
+        let tooth = spoken_tooth(&display_tooth(&change.tooth, change.is_milk_tooth));
+        let observation = if change.for_observation {
+            " за наблюдение"
+        } else {
+            ""
+        };
+        parts.push(format!(
+            "{verb} {name}{surface} на зъб {tooth}{observation}"
+        ));
     }
     Ok(format!("Ще {}. Да го запиша ли?", parts.join(" и ")))
 }

@@ -1,8 +1,9 @@
 use super::{
+    browser,
     clinic::parse_clinic_reference,
     draft,
     presentation::{self, PatientView},
-    treatment, types, workflow,
+    record_read, status_read, treatment, types, workflow,
 };
 use crate::{acquire_operation, aidoo_keyring_entry, stop_wake_word_listener, storage, AppState};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -14,24 +15,21 @@ fn set_connection_error(state: &AppState, error: Option<String>) {
     }
 }
 
+#[tauri::command]
+pub(crate) fn aidoo_preview_official_note(
+    text: String,
+    patient_id: String,
+) -> Result<bool, String> {
+    browser::preview_official_note(&text, &patient_id)
+}
+
 pub(super) fn show_patient_view(
     app: &AppHandle,
     state: &AppState,
     patient_id: &str,
     view: PatientView,
-) {
-    let clinic_link = state.settings.lock().ok().and_then(|settings| {
-        if !settings.aidoo_browser_sync_enabled {
-            return None;
-        }
-        settings
-            .aidoo_clinic_url
-            .clone()
-            .or_else(|| settings.aidoo_clinic_slug.clone())
-    });
-    if let Some(clinic_link) = clinic_link {
-        presentation::present_patient(app.clone(), clinic_link, patient_id.to_string(), view);
-    }
+) -> Result<(), String> {
+    presentation::present_patient(app, state, patient_id.to_string(), view)
 }
 
 async fn reconnect_from_saved(state: &AppState) -> Result<types::AidooConnectionStatus, String> {
@@ -108,6 +106,7 @@ pub(crate) fn schedule_aidoo_auto_reconnect(app: AppHandle, refresh_existing: bo
             }
             Err(error) => {
                 state.aidoo.disconnect();
+                presentation::close();
                 set_connection_error(&state, Some(error.clone()));
                 storage::append_diagnostic(&format!(
                     "AIDOO Control automatic reconnect failed: {error}"
@@ -141,6 +140,7 @@ pub(crate) async fn connect_aidoo(
     }
     if let Err(error) = aidoo_keyring_entry()?.set_password(&password) {
         state.aidoo.disconnect();
+        presentation::close();
         return Err(format!(
             "AIDOO паролата не можа да бъде запазена в Keychain: {error}"
         ));
@@ -182,6 +182,7 @@ pub(crate) fn disconnect_aidoo(
         Err(error) => return Err(format!("AIDOO паролата не можа да бъде изтрита: {error}")),
     }
     state.aidoo.disconnect();
+    presentation::close();
     let mut settings = state
         .settings
         .lock()
@@ -219,6 +220,7 @@ pub(crate) async fn reconnect_aidoo(
         }
         Err(error) => {
             state.aidoo.disconnect();
+            presentation::close();
             set_connection_error(&state, Some(error.clone()));
             let _ = app.emit("aidoo:connection-changed", false);
             Err(error)
@@ -240,7 +242,7 @@ pub(crate) async fn aidoo_search_patients(
         .await
         .map_err(|error| error.message)?;
     if let Some(patient) = state.aidoo.remember_patient_search(&results)? {
-        show_patient_view(&app, &state, &patient.id, PatientView::Status);
+        let _ = show_patient_view(&app, &state, &patient.id, PatientView::Treatment);
     }
     Ok(results)
 }
@@ -257,6 +259,151 @@ pub(crate) async fn aidoo_status_catalog(
         .await
         .map(draft::editable_status_catalog)
         .map_err(|error| error.message)
+}
+
+#[tauri::command]
+pub(crate) async fn aidoo_read_status(
+    patient_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<types::StatusReadResult, String> {
+    let _ = show_patient_view(&app, &state, &patient_id, PatientView::Status);
+    let session = state.aidoo.session()?;
+    let client = state.aidoo.client()?;
+    let visit_id = match client
+        .active_visit(&session.token, &session.clinic_id, &patient_id)
+        .await
+    {
+        Ok(visit) => Some(visit.id),
+        Err(error) if error.is_not_found() => {
+            let mut visits = client
+                .visits(&session.token, &session.clinic_id, &patient_id)
+                .await
+                .map_err(|error| error.message)?;
+            visits.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
+            visits
+                .into_iter()
+                .find(|visit| visit.created_status_update && !visit.cancelled)
+                .map(|visit| visit.id)
+        }
+        Err(error) => return Err(error.message),
+    };
+    let Some(visit_id) = visit_id else {
+        return Ok(status_read::build_status_read_result(Vec::new(), &[]));
+    };
+    let read = client
+        .visit_status(&session.token, &session.clinic_id, &patient_id, &visit_id)
+        .await
+        .map_err(|error| error.message)?;
+    let catalog = client
+        .status_catalog(&session.token)
+        .await
+        .map_err(|error| error.message)?;
+    let current = read
+        .visit_teeth_status
+        .into_iter()
+        .map(|entry| entry.current_tooth_status)
+        .collect();
+    Ok(status_read::build_status_read_result(current, &catalog))
+}
+
+#[tauri::command]
+pub(crate) async fn aidoo_read_treatments(
+    patient_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<types::TreatmentReadResult, String> {
+    let _ = show_patient_view(&app, &state, &patient_id, PatientView::Treatment);
+    let session = state.aidoo.session()?;
+    let client = state.aidoo.client()?;
+    let treatments = match client
+        .active_visit(&session.token, &session.clinic_id, &patient_id)
+        .await
+    {
+        Ok(visit) => client
+            .visit_treatments(&session.token, &session.clinic_id, &patient_id, &visit.id)
+            .await
+            .map_err(|error| error.message)?,
+        Err(error) if error.is_not_found() => {
+            let mut visits = client
+                .visits(&session.token, &session.clinic_id, &patient_id)
+                .await
+                .map_err(|error| error.message)?;
+            visits.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
+            let mut latest = Vec::new();
+            for visit in visits.into_iter().filter(|visit| !visit.cancelled).take(20) {
+                let rows = client
+                    .visit_treatments(&session.token, &session.clinic_id, &patient_id, &visit.id)
+                    .await
+                    .map_err(|error| error.message)?;
+                if !rows.is_empty() {
+                    latest = rows;
+                    break;
+                }
+            }
+            latest
+        }
+        Err(error) => return Err(error.message),
+    };
+    if treatments.is_empty() {
+        return Ok(record_read::build_treatment_read_result(
+            Vec::new(),
+            &[],
+            &[],
+        ));
+    }
+    let diagnoses = client
+        .diagnosis_catalog(&session.token, &session.clinic_id)
+        .await
+        .map_err(|error| error.message)?;
+    let procedures = client
+        .procedure_catalog(
+            &session.token,
+            &session.clinic_id,
+            session.current_currency.as_deref(),
+        )
+        .await
+        .map_err(|error| error.message)?;
+    Ok(record_read::build_treatment_read_result(
+        treatments,
+        &diagnoses,
+        &procedures,
+    ))
+}
+
+#[tauri::command]
+pub(crate) async fn aidoo_read_visits(
+    patient_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<types::VisitReadResult, String> {
+    let _ = show_patient_view(&app, &state, &patient_id, PatientView::Treatment);
+    let session = state.aidoo.session()?;
+    let visits = state
+        .aidoo
+        .client()?
+        .visits(&session.token, &session.clinic_id, &patient_id)
+        .await
+        .map_err(|error| error.message)?;
+    Ok(record_read::build_visit_read_result(visits))
+}
+
+#[tauri::command]
+pub(crate) async fn aidoo_read_patient_data(
+    patient_id: String,
+    category: types::PatientDataCategory,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<types::PatientDataReadResult, String> {
+    let _ = show_patient_view(&app, &state, &patient_id, PatientView::Treatment);
+    let session = state.aidoo.session()?;
+    let patient = state
+        .aidoo
+        .client()?
+        .patient_record_details(&session.token, &session.clinic_id, &patient_id)
+        .await
+        .map_err(|error| error.message)?;
+    Ok(record_read::build_patient_data_result(patient, category))
 }
 
 #[tauri::command]
@@ -308,7 +455,7 @@ pub(crate) async fn aidoo_active_treatments(
         .visit_treatments(&session.token, &session.clinic_id, &patient_id, &visit.id)
         .await
         .map_err(|error| error.message)?;
-    show_patient_view(&app, &state, &patient_id, PatientView::Treatment);
+    let _ = show_patient_view(&app, &state, &patient_id, PatientView::Treatment);
     Ok(treatments)
 }
 
@@ -332,7 +479,7 @@ pub(crate) async fn aidoo_create_status_visit(
         is_nzok,
     )
     .await;
-    show_patient_view(&app, &state, &patient_id, PatientView::Status);
+    let _ = show_patient_view(&app, &state, &patient_id, PatientView::Status);
     result.map_err(|error| error.message)
 }
 
@@ -377,7 +524,7 @@ pub(crate) async fn aidoo_prepare_status_draft(
     };
     let view_patient_id = draft.patient_id.clone();
     state.aidoo.store_draft(draft)?;
-    show_patient_view(&app, &state, &view_patient_id, PatientView::Status);
+    let _ = show_patient_view(&app, &state, &view_patient_id, PatientView::Status);
     Ok(preview)
 }
 
@@ -394,7 +541,7 @@ pub(crate) async fn aidoo_confirm_status_draft(
     let client = state.aidoo.client()?;
     let result =
         workflow::apply_confirmed_draft(&client, &session.token, &session.clinic_id, &draft).await;
-    show_patient_view(&app, &state, &draft.patient_id, PatientView::Status);
+    let _ = show_patient_view(&app, &state, &draft.patient_id, PatientView::Status);
     result.map_err(|error| error.message)
 }
 
@@ -458,7 +605,7 @@ pub(crate) async fn aidoo_prepare_treatment_draft(
     };
     let view_patient_id = draft.patient_id.clone();
     state.aidoo.store_treatment_draft(draft)?;
-    show_patient_view(&app, &state, &view_patient_id, PatientView::Treatment);
+    let _ = show_patient_view(&app, &state, &view_patient_id, PatientView::Treatment);
     Ok(preview)
 }
 
@@ -480,7 +627,7 @@ pub(crate) async fn aidoo_confirm_treatment_draft(
         &draft,
     )
     .await;
-    show_patient_view(&app, &state, &draft.patient_id, PatientView::Treatment);
+    let _ = show_patient_view(&app, &state, &draft.patient_id, PatientView::Treatment);
     result.map_err(|error| error.message)
 }
 

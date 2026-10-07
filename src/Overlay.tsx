@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createEventScope } from "./lib/event-scope";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
-import { Check, CircleAlert, LoaderCircle, Mic, Square } from "lucide-react";
+import { Check, CircleAlert, GripHorizontal, LoaderCircle, Mic, Square } from "lucide-react";
 import type { AppSettings, OverlayBootstrapState, RecordingProgress, RecordingSnapshot } from "./types";
 import { errorMessage, progressLabel, resolveLanguage } from "./i18n";
 
@@ -14,6 +14,11 @@ const initial: RecordingSnapshot = {
   error: null,
   trigger: null,
 };
+
+interface AssistantNoteTranscript {
+  active: boolean;
+  text: string;
+}
 
 const stateText = {
   bg: {
@@ -49,6 +54,7 @@ export default function Overlay() {
   const [assistantPhase, setAssistantPhase] = useState<OverlayBootstrapState["assistantPhase"]>("idle");
   const [language, setLanguage] = useState<"bg" | "en">("bg");
   const [notice, setNotice] = useState<string | null>(null);
+  const [assistantNoteTranscript, setAssistantNoteTranscript] = useState<AssistantNoteTranscript>({ active: false, text: "" });
   const card = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -65,6 +71,7 @@ export default function Overlay() {
     });
     events.listen<RecordingSnapshot>("recording:snapshot", ({ payload }) => setSnapshot(payload));
     events.listen<OverlayBootstrapState["assistantPhase"]>("assistant:phase", ({ payload }) => setAssistantPhase(payload));
+    events.listen<AssistantNoteTranscript>("assistant:note-transcript", ({ payload }) => setAssistantNoteTranscript(payload));
     events.listen<string>("recording:state", ({ payload }) => {
       if (payload === "starting" || payload === "idle") setNotice(null);
       setSnapshot((current) => ({ ...current, state: payload as RecordingSnapshot["state"] }));
@@ -115,10 +122,10 @@ export default function Overlay() {
 
   useEffect(() => {
     const height = Math.max(132, Math.min(260, (card.current?.scrollHeight ?? 84) + 48));
-    void getCurrentWindow().setSize(new LogicalSize(552, height)).then(() => invoke("reposition_overlay")).catch(() => {
+    void getCurrentWindow().setSize(new LogicalSize(552, height)).catch(() => {
       // Keep the previous size if the native window is closing or temporarily unavailable.
     });
-  }, [snapshot.state, snapshot.error, snapshot.progress.stage, assistantPhase, notice]);
+  }, [snapshot.state, snapshot.error, snapshot.progress.stage, assistantPhase, assistantNoteTranscript, notice]);
 
   const label = stateText[language];
   const stage = progressLabel(snapshot.progress.stage, language);
@@ -135,6 +142,13 @@ export default function Overlay() {
     } catch (reason) {
       setNotice(errorMessage(reason, language));
     }
+  };
+  const beginOverlayDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    void getCurrentWindow().startDragging().catch(() => {
+      // The window may be disappearing while the pointer is pressed.
+    });
   };
   const icon = useMemo(() => {
     if (snapshot.state === "done") return <Check />;
@@ -156,19 +170,28 @@ export default function Overlay() {
   return (
     <main className="overlay-shell">
       {assistantActive ? <div ref={card} className={`overlay-card assistant ${assistantPhase}`}>
+        <button className="overlay-drag-handle" type="button" title={language === "bg" ? "Премести овърлея" : "Move overlay"} aria-label={language === "bg" ? "Премести овърлея" : "Move overlay"} onPointerDown={beginOverlayDrag}>
+          <GripHorizontal aria-hidden="true" />
+        </button>
         <div className="assistant-voice-orb" aria-hidden="true">
           <img src="/app-icon.png" alt="" />
           {(assistantPhase === "preparing" || assistantPhase === "connecting" || assistantPhase === "working" || assistantPhase === "switching" || assistantPhase === "closing") && <LoaderCircle className="assistant-orb-loader spin" />}
         </div>
         <div className="overlay-copy" role="status" aria-live="polite" aria-atomic="true">
-          <strong>{assistantStatus}</strong>
-          <span>{language === "bg" ? "„Започни транскрипция“ за запис · „Край“ за приключване" : "“Start transcription” to record · “End” to finish"}</span>
+          <strong>{assistantNoteTranscript.active ? (language === "bg" ? "Официална забележка" : "Official note") : assistantStatus}</strong>
+          {assistantNoteTranscript.active
+            ? <span className="assistant-note-transcript">{assistantNoteTranscript.text}</span>
+            : <span>{language === "bg" ? "„Започни транскрипция“ за запис · „Край“ за приключване" : "“Start transcription” to record · “End” to finish"}</span>}
+          {notice && <span className="notice-text" role="alert">{errorMessage(notice, language)}</span>}
         </div>
         {(assistantPhase === "listening" || assistantPhase === "speaking") && <div className="overlay-wave assistant-wave" aria-hidden="true">{Array.from({ length: 7 }, (_, index) => <i key={index} style={{ animationDelay: `${index * -0.09}s` }} />)}</div>}
         <button className="overlay-stop assistant-stop" type="button" title={language === "bg" ? "Приключи AI разговора" : "End the AI conversation"} aria-label={language === "bg" ? "Приключи AI разговора" : "End the AI conversation"} onClick={() => void stopAssistant()}>
           <Square aria-hidden="true" /><span>{language === "bg" ? "Край" : "End"}</span>
         </button>
       </div> : <div ref={card} className={`overlay-card ${snapshot.state}`}>
+        <button className="overlay-drag-handle" type="button" title={language === "bg" ? "Премести овърлея" : "Move overlay"} aria-label={language === "bg" ? "Премести овърлея" : "Move overlay"} onPointerDown={beginOverlayDrag}>
+          <GripHorizontal aria-hidden="true" />
+        </button>
         <div className={`overlay-state-icon ${snapshot.state}`} aria-hidden="true">{icon}</div>
         <div className="overlay-copy" role={snapshot.state === "error" ? "alert" : "status"} aria-live={snapshot.state === "error" ? "assertive" : "polite"} aria-atomic="true">
           <strong>{label[snapshot.state]}</strong>

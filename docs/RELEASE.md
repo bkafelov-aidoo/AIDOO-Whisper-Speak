@@ -4,7 +4,7 @@
 
 Direct website distribution uses **Developer ID Application: Aidoo Ltd. OOD (4KKVT2TUUA)** with Hardened Runtime. It does not use Apple Distribution, Mac Installer Distribution or a development certificate. The existing `AIDOO_VIEWER_NOTARY` notarytool Keychain profile authenticates Apple notarization.
 
-The bundle identifier is `app.aidoo.whisper-lite`, the minimum system version is macOS 13, and the first release targets Apple Silicon only. The app requests microphone access, Accessibility and optional Apple Events access to Google Chrome so AIDOO Control can reuse the clinic tab and show confirmed changes immediately. If the user denies Chrome control, the app opens the canonical patient URL without tab reuse. It is not App Sandbox constrained because it is distributed outside the Mac App Store.
+The bundle identifier is `app.aidoo.whisper-lite`, the minimum system version is macOS 13, and the first release targets Apple Silicon only. The app requests microphone access and Accessibility. AIDOO patient, status, treatment and schedule presentation uses one dedicated Chrome window with the real AIDOO interface. Navigation reuses the existing Accessibility permission and does not require a Chrome extension, a Developer setting or Apple Events access. It is not App Sandbox constrained because it is distributed outside the Mac App Store.
 
 ## Version and local release
 

@@ -2,12 +2,16 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import Overlay from "./Overlay";
+import LiveDiagnosticsWindow from "./LiveDiagnosticsWindow";
 import "./styles.css";
 
-const isOverlay = new URLSearchParams(window.location.search).get("window") === "overlay";
-document.documentElement.dataset.window = isOverlay ? "overlay" : "main";
-document.body.dataset.window = isOverlay ? "overlay" : "main";
+const requestedWindow = new URLSearchParams(window.location.search).get("window");
+const isOverlay = requestedWindow === "overlay";
+const isLiveDiagnostics = requestedWindow === "live-diagnostics";
+const windowKind = isOverlay ? "overlay" : isLiveDiagnostics ? "live-diagnostics" : "main";
+document.documentElement.dataset.window = windowKind;
+document.body.dataset.window = windowKind;
 
 createRoot(document.getElementById("root")!).render(
-  <StrictMode>{isOverlay ? <Overlay /> : <App />}</StrictMode>,
+  <StrictMode>{isOverlay ? <Overlay /> : isLiveDiagnostics ? <LiveDiagnosticsWindow /> : <App />}</StrictMode>,
 );

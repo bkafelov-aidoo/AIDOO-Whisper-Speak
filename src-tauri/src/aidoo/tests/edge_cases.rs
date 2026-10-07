@@ -1,5 +1,270 @@
 use super::*;
 
+#[tokio::test]
+async fn client_reads_the_visit_list_used_for_historical_status_fallback() {
+    let (base, requests) = scripted_server(vec![ResponseScript::json(
+        200,
+        r#"[{"id":"visit-id","createdStatusUpdate":true,"cancelled":false,"timestamp":"2026-09-17T10:00:00Z"}]"#,
+    )]);
+    let client = AidooClient::for_test(base, Duration::from_secs(2));
+    let visits = client
+        .visits("session-token", "clinic-id", "patient-id")
+        .await
+        .unwrap();
+    assert_eq!(visits.len(), 1);
+    assert!(visits[0].created_status_update);
+    assert_eq!(visits[0].timestamp.as_deref(), Some("2026-09-17T10:00:00Z"));
+    let request = requests.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(request.starts_with("GET /clinics/clinic-id/patients/patient-id/visits HTTP/1.1"));
+}
+
+#[test]
+fn milk_tooth_and_observation_follow_the_aidoo_base_tooth_contract() {
+    let healthy = StatusCatalogEntry {
+        id: "healthy-id".into(),
+        name: "Здрав".into(),
+        code: "H".into(),
+        order: 1,
+        diagnosis_id: None,
+        can_have_regions: false,
+        regions: vec![],
+        incompatible_statuses: vec![],
+        nzis_tooth_diagnosis_id: None,
+    };
+    let draft = build_draft(
+        "patient-id".into(),
+        &visit(true),
+        false,
+        vec![],
+        &[healthy],
+        &[StatusChange {
+            operation: StatusOperation::Add,
+            tooth: "55".into(),
+            status_id: "healthy-id".into(),
+            regions: vec![],
+            existing_status_id: None,
+            is_milk_tooth: false,
+            for_observation: true,
+            note: None,
+        }],
+    )
+    .unwrap();
+
+    assert_eq!(draft.writes[0].tooth, "15");
+    assert!(draft.writes[0].is_milk_tooth);
+    assert!(draft.writes[0].for_observation);
+    assert!(draft.spoken_summary.contains("зъб пет пет за наблюдение"));
+}
+
+#[test]
+fn several_spoken_statuses_become_one_multi_write_draft() {
+    let draft = build_draft(
+        "patient-id".into(),
+        &visit(true),
+        false,
+        vec![],
+        &catalog(),
+        &[
+            StatusChange {
+                operation: StatusOperation::Add,
+                tooth: "16".into(),
+                status_id: "caries-id".into(),
+                regions: vec!["OCCLUSAL".into()],
+                existing_status_id: None,
+                is_milk_tooth: false,
+                for_observation: false,
+                note: None,
+            },
+            StatusChange {
+                operation: StatusOperation::Add,
+                tooth: "26".into(),
+                status_id: "restoration-id".into(),
+                regions: vec!["MESIAL".into()],
+                existing_status_id: None,
+                is_milk_tooth: false,
+                for_observation: false,
+                note: None,
+            },
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(draft.writes.len(), 2);
+    assert!(draft.spoken_summary.contains("зъб едно шест"));
+    assert!(draft.spoken_summary.contains("зъб две шест"));
+}
+
+#[tokio::test]
+async fn grouped_statuses_use_one_put_and_one_independent_readback() {
+    let desired_16 = status_json("16", &["caries-id"], &["OCCLUSAL"]);
+    let desired_26 = status_json("26", &["restoration-id"], &["MESIAL"]);
+    let (base, requests) = scripted_server(vec![
+        ResponseScript::json(200, r#"{"teethStatus":[]}"#),
+        ResponseScript::json(
+            200,
+            &format!(r#"{{"teethStatus":[{desired_16},{desired_26}]}}"#),
+        ),
+        ResponseScript::json(
+            200,
+            &format!(
+                r#"{{"visitTeethStatus":[{{"currentToothStatus":{desired_16},"previousToothStatus":null}},{{"currentToothStatus":{desired_26},"previousToothStatus":null}}]}}"#
+            ),
+        ),
+    ]);
+    let client = AidooClient::for_test(base, Duration::from_secs(2));
+    let draft = build_draft(
+        "patient-id".into(),
+        &visit(true),
+        false,
+        vec![],
+        &catalog(),
+        &[
+            StatusChange {
+                operation: StatusOperation::Add,
+                tooth: "16".into(),
+                status_id: "caries-id".into(),
+                regions: vec!["OCCLUSAL".into()],
+                existing_status_id: None,
+                is_milk_tooth: false,
+                for_observation: false,
+                note: None,
+            },
+            StatusChange {
+                operation: StatusOperation::Add,
+                tooth: "26".into(),
+                status_id: "restoration-id".into(),
+                regions: vec!["MESIAL".into()],
+                existing_status_id: None,
+                is_milk_tooth: false,
+                for_observation: false,
+                note: None,
+            },
+        ],
+    )
+    .unwrap();
+
+    let result = apply_confirmed_draft(&client, "token", "clinic-id", &draft)
+        .await
+        .unwrap();
+    assert_eq!(result.outcome, VerificationOutcome::Verified);
+    let captured = (0..3)
+        .map(|_| requests.recv_timeout(Duration::from_secs(1)).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        captured
+            .iter()
+            .filter(|request| request.starts_with("PUT "))
+            .count(),
+        1
+    );
+    assert_eq!(
+        captured
+            .iter()
+            .filter(|request| request.contains("/teeth-status/visits/"))
+            .count(),
+        1
+    );
+    assert!(captured[1].contains("\"tooth\":\"16\""));
+    assert!(captured[1].contains("\"tooth\":\"26\""));
+}
+
+#[test]
+fn new_milk_treatment_combines_diagnosis_and_procedure_in_one_draft() {
+    let draft = build_treatment_draft(
+        "patient-id".into(),
+        &visit(true),
+        vec![treatment("existing-row", None, None, None, &[])],
+        &diagnosis_catalog(),
+        &procedure_catalog(),
+        TreatmentChange {
+            tooth: "55".into(),
+            existing_treatment_id: None,
+            diagnosis_id: Some("diagnosis-id".into()),
+            treatment_id: None,
+            note: None,
+            procedure_ids: vec!["procedure-id".into()],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(draft.existing_treatment_id, None);
+    assert_eq!(draft.treatment.tooth, "15");
+    assert!(draft.treatment.is_milk_tooth);
+    assert_eq!(
+        draft.treatment.diagnosis_id.as_deref(),
+        Some("diagnosis-id")
+    );
+    assert_eq!(draft.procedures.len(), 1);
+    assert!(draft.spoken_summary.contains("зъб пет пет"));
+}
+
+#[tokio::test]
+async fn client_uses_the_observed_nzok_status_check_contract() {
+    let (base, requests) = scripted_server(vec![
+        ResponseScript::json(200, r#""<xml>check</xml>""#),
+        ResponseScript::json(200, "true"),
+        ResponseScript::json(
+            200,
+            r#"{"id":"patient-id","firstName":"Тест","lastName":"Пациент","identifier":"0000000000","identifierType":"ЕГН"}"#,
+        ),
+    ]);
+    let client = AidooClient::for_test(base, Duration::from_secs(2));
+
+    let xml = client
+        .nzis_status_search_xml("token", "clinic-id", "patient-id")
+        .await
+        .unwrap();
+    assert_eq!(xml, "<xml>check</xml>");
+    assert!(client
+        .has_available_status_check(
+            "token",
+            "clinic-id",
+            "<signed />",
+            &serde_json::json!({"history": []}),
+        )
+        .await
+        .unwrap());
+    let patient = client
+        .patient_details("token", "clinic-id", "patient-id")
+        .await
+        .unwrap();
+    assert_eq!(patient.identifier.as_deref(), Some("0000000000"));
+    assert_eq!(patient.identifier_type.as_deref(), Some("ЕГН"));
+
+    let captured = (0..3)
+        .map(|_| requests.recv_timeout(Duration::from_secs(1)).unwrap())
+        .collect::<Vec<_>>();
+    assert!(captured[0].starts_with(
+        "GET /clinics/clinic-id/nzok-checks/patients/patient-id/nzis-search-xml HTTP/1.1"
+    ));
+    assert!(
+        captured[1].starts_with("POST /clinics/clinic-id/nzok-checks/has-status-checks HTTP/1.1")
+    );
+    assert!(captured[1].contains("\"signedNzisXml\":\"<signed />\""));
+    assert!(captured[1].contains("\"nzokData\":{\"history\":[]}"));
+    assert!(captured[2].starts_with("GET /clinics/clinic-id/patients/patient-id HTTP/1.1"));
+}
+
+#[tokio::test]
+async fn active_visit_maps_the_observed_no_visit_400_to_missing() {
+    let (base, requests) = scripted_server(vec![ResponseScript::json(
+        400,
+        r#"{"error":"No active visit found for patient with id: patient-id","details":null}"#,
+    )]);
+    let client = AidooClient::for_test(base, Duration::from_secs(2));
+
+    let error = client
+        .active_visit("token", "clinic-id", "patient-id")
+        .await
+        .unwrap_err();
+
+    assert!(error.is_not_found());
+    let request = requests.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(
+        request.starts_with("GET /clinics/clinic-id/patients/patient-id/visits/active HTTP/1.1")
+    );
+}
+
 #[test]
 fn treatment_draft_targets_one_of_multiple_rows_and_allows_note_only() {
     let baseline = vec![

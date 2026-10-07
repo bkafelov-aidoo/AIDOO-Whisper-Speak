@@ -44,7 +44,13 @@ export default function App() {
     showToast(translator(languageRef.current)("assistantDictationStarted"));
   }, [showToast]);
   const handleAssistantRequested = useCallback(() => setPage("assistant"), []);
-  const live = useLiveConversation(data?.settings.microphoneName ?? null, showLiveError, handleAssistantDictation, handleAssistantRequested);
+  const live = useLiveConversation(
+    data?.settings.microphoneName ?? null,
+    showLiveError,
+    handleAssistantDictation,
+    handleAssistantRequested,
+    data?.diagnosticsAvailable ?? false,
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -201,6 +207,11 @@ export default function App() {
             available={data.settings.onboardingComplete && data.hasApiKey}
             dictationBusy={recordingBusy}
             aidooConnected={data.aidooConnected}
+            onOpenDiagnostics={data.diagnosticsAvailable ? () => {
+              void import("./lib/live-diagnostics-window")
+                .then(({ openLiveDiagnosticsWindow }) => openLiveDiagnosticsWindow(language))
+                .catch((reason) => showToast(errorMessage(reason, language), "error"));
+            } : undefined}
           />
         )}
         {page === "history" && (

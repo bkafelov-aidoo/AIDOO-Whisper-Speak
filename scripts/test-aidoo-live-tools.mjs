@@ -2,6 +2,48 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { backendUsageFromLiveEvent, executeAidooLiveTool, functionCallFromLiveEvent } from "../src/lib/aidoo-live-tools.ts";
 
+test("starts the Treatment visit separately from a tooth row using only the patient", async () => {
+  const calls = [];
+  const result = await executeAidooLiveTool({
+    type: "function_call",
+    call_id: "call-begin-treatment",
+    name: "begin_aidoo_treatment",
+    arguments: JSON.stringify({
+      patientId: "patient-test",
+      doctorId: "must-not-override-the-authenticated-doctor",
+      tooth: "must-not-be-required-for-a-visit",
+    }),
+  }, async (command, args) => {
+    calls.push({ command, args });
+    return { visit: { id: "visit-test" }, created: true, spokenSummary: "Лечението е отворено." };
+  });
+  assert.deepEqual(calls, [{ command: "aidoo_begin_treatment", args: { patientId: "patient-test" } }]);
+  assert.equal(JSON.parse(result.output).ok, true);
+});
+
+test("maps visible Treatment tooth selection without changing milk-tooth state", async () => {
+  const calls = [];
+  const result = await executeAidooLiveTool({
+    type: "function_call",
+    call_id: "call-select-treatment-tooth",
+    name: "select_aidoo_treatment_tooth",
+    arguments: JSON.stringify({
+      patientId: "patient-test",
+      tooth: "55",
+      isMilkTooth: true,
+    }),
+  }, async (command, args) => {
+    calls.push({ command, args });
+    return { tooth: "15", visibleInBrowser: true };
+  });
+
+  assert.deepEqual(calls, [{
+    command: "aidoo_select_treatment_tooth",
+    args: { patientId: "patient-test", tooth: "55" },
+  }]);
+  assert.equal(JSON.parse(result.output).ok, true);
+});
+
 test("extracts only completed delegated function calls", () => {
   assert.equal(functionCallFromLiveEvent({ type: "response.event", event: { type: "response.output_text.delta" } }), null);
   assert.deepEqual(functionCallFromLiveEvent({
@@ -88,17 +130,32 @@ test("maps the direct clinical protocol without confirmation round trips", async
   await executeAidooLiveTool({
     type: "function_call",
     call_id: "call-direct-status",
-    name: "apply_aidoo_status",
+    name: "apply_aidoo_statuses",
     arguments: JSON.stringify({
       patientId: "patient-test",
       isNzok: false,
-      change: {
+      changes: [{
         tooth: "16",
         status: "Кариес",
         regions: ["OCCLUSAL"],
         replaceStatus: null,
         isMilkTooth: false,
         forObservation: false,
+        note: null,
+      }],
+    }),
+  }, invoke);
+  await executeAidooLiveTool({
+    type: "function_call",
+    call_id: "call-create-treatment",
+    name: "create_aidoo_treatment",
+    arguments: JSON.stringify({
+      patientId: "patient-test",
+      change: {
+        tooth: "55",
+        isMilkTooth: true,
+        diagnosis: "Кариес на дентина",
+        procedures: ["Обтурация"],
         note: null,
       },
     }),
@@ -123,17 +180,30 @@ test("maps the direct clinical protocol without confirmation round trips", async
 
   assert.deepEqual(calls, [
     {
-      command: "aidoo_apply_status",
+      command: "aidoo_apply_statuses",
       args: {
         patientId: "patient-test",
         isNzok: false,
-        change: {
+        changes: [{
           tooth: "16",
           status: "Кариес",
           regions: ["OCCLUSAL"],
           replaceStatus: null,
           isMilkTooth: false,
           forObservation: false,
+          note: null,
+        }],
+      },
+    },
+    {
+      command: "aidoo_create_treatment",
+      args: {
+        patientId: "patient-test",
+        change: {
+          tooth: "55",
+          isMilkTooth: true,
+          diagnosis: "Кариес на дентина",
+          procedures: ["Обтурация"],
           note: null,
         },
       },
@@ -262,6 +332,55 @@ test("reads active treatment rows before selecting one", async () => {
     command: "aidoo_active_treatments",
     args: { patientId: "patient-test" },
   }]);
+});
+
+test("reads the visible patient status through the protected command", async () => {
+  const calls = [];
+  const result = await executeAidooLiveTool({
+    type: "function_call",
+    call_id: "call-read-status",
+    name: "read_aidoo_status",
+    arguments: JSON.stringify({ patientId: "patient-test" }),
+  }, async (command, args) => {
+    calls.push({ command, args });
+    return { entries: [{ tooth: "16", statuses: ["Кариес"] }], spokenSummary: "Текущият статус е: зъб 16: Кариес." };
+  });
+  assert.deepEqual(calls, [{
+    command: "aidoo_read_status",
+    args: { patientId: "patient-test" },
+  }]);
+  assert.equal(JSON.parse(result.output).result.spokenSummary, "Текущият статус е: зъб 16: Кариес.");
+});
+
+test("maps treatment, visit and scoped patient-data reads", async () => {
+  const calls = [];
+  const invoke = async (command, args) => {
+    calls.push({ command, args });
+    return { spokenSummary: "Прочетено." };
+  };
+  await executeAidooLiveTool({
+    type: "function_call",
+    call_id: "call-read-treatments",
+    name: "read_aidoo_treatments",
+    arguments: JSON.stringify({ patientId: "patient-test" }),
+  }, invoke);
+  await executeAidooLiveTool({
+    type: "function_call",
+    call_id: "call-read-visits",
+    name: "read_aidoo_visits",
+    arguments: JSON.stringify({ patientId: "patient-test" }),
+  }, invoke);
+  await executeAidooLiveTool({
+    type: "function_call",
+    call_id: "call-read-medical",
+    name: "read_aidoo_patient_data",
+    arguments: JSON.stringify({ patientId: "patient-test", category: "medical" }),
+  }, invoke);
+  assert.deepEqual(calls, [
+    { command: "aidoo_read_treatments", args: { patientId: "patient-test" } },
+    { command: "aidoo_read_visits", args: { patientId: "patient-test" } },
+    { command: "aidoo_read_patient_data", args: { patientId: "patient-test", category: "medical" } },
+  ]);
 });
 
 test("rejects unknown tools and malformed arguments before invoking native code", async () => {

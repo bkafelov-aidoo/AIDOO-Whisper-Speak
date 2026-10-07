@@ -11,6 +11,7 @@ pub struct AidooRuntime {
     pending_draft: Mutex<Option<StatusDraft>>,
     pending_treatment_draft: Mutex<Option<TreatmentDraft>>,
     pending_schedule_slot: Mutex<Option<ScheduleSlot>>,
+    pending_nzok_patient: Mutex<Option<String>>,
     patient_cursor: Mutex<PatientCursor>,
 }
 
@@ -25,6 +26,7 @@ struct AidooSession {
     clinic_id: String,
     doctor_id: String,
     current_currency: Option<String>,
+    works_with_nzok: bool,
 }
 
 pub struct AidooSessionSnapshot {
@@ -32,6 +34,7 @@ pub struct AidooSessionSnapshot {
     pub clinic_id: String,
     pub doctor_id: String,
     pub current_currency: Option<String>,
+    pub works_with_nzok: bool,
 }
 
 impl AidooRuntime {
@@ -44,6 +47,7 @@ impl AidooRuntime {
             pending_draft: Mutex::new(None),
             pending_treatment_draft: Mutex::new(None),
             pending_schedule_slot: Mutex::new(None),
+            pending_nzok_patient: Mutex::new(None),
             patient_cursor: Mutex::new(PatientCursor::default()),
         }
     }
@@ -78,6 +82,7 @@ impl AidooRuntime {
             clinic_id: response.user.clinic.id,
             doctor_id: response.user.id,
             current_currency: response.user.clinic.current_currency,
+            works_with_nzok: response.user.clinic.works_with_nzok,
         });
         Ok(())
     }
@@ -102,6 +107,7 @@ impl AidooRuntime {
             clinic_id: session.clinic_id.clone(),
             doctor_id: session.doctor_id.clone(),
             current_currency: session.current_currency.clone(),
+            works_with_nzok: session.works_with_nzok,
         })
     }
 
@@ -119,6 +125,7 @@ impl AidooRuntime {
         self.cancel_draft();
         self.cancel_treatment_draft();
         self.clear_schedule_slot();
+        self.clear_nzok_choice();
         if let Ok(mut cursor) = self.patient_cursor.lock() {
             *cursor = PatientCursor::default();
         }
@@ -203,6 +210,32 @@ impl AidooRuntime {
         }
     }
 
+    pub fn remember_nzok_choice(&self, patient_id: &str) -> Result<(), String> {
+        *self
+            .pending_nzok_patient
+            .lock()
+            .map_err(|_| "НЗОК изборът е заключен.")? = Some(patient_id.to_string());
+        Ok(())
+    }
+
+    pub fn take_nzok_choice(&self, patient_id: &str) -> Result<bool, String> {
+        let mut pending = self
+            .pending_nzok_patient
+            .lock()
+            .map_err(|_| "НЗОК изборът е заключен.")?;
+        let matches = pending.as_deref() == Some(patient_id);
+        if matches {
+            *pending = None;
+        }
+        Ok(matches)
+    }
+
+    pub fn clear_nzok_choice(&self) {
+        if let Ok(mut pending) = self.pending_nzok_patient.lock() {
+            *pending = None;
+        }
+    }
+
     pub fn remember_patient_search(
         &self,
         results: &[PatientSearchResult],
@@ -246,6 +279,21 @@ impl AidooRuntime {
             .ok_or_else(|| "Пациентът не е сред последните резултати. Потърсете го отново.".into())
     }
 
+    pub fn selected_patient(&self, patient_id: &str) -> Result<PatientSummary, String> {
+        let cursor = self
+            .patient_cursor
+            .lock()
+            .map_err(|_| "Изборът на пациент е заключен.")?;
+        let patient = cursor
+            .selected
+            .and_then(|index| cursor.recent.get(index))
+            .filter(|patient| patient.id == patient_id)
+            .cloned();
+        patient.ok_or_else(|| {
+            "Пациентът не е избран. Потърсете го отново и изберете точния резултат.".into()
+        })
+    }
+
     pub fn select_next_patient(&self) -> Result<PatientSummary, String> {
         let mut cursor = self
             .patient_cursor
@@ -277,6 +325,8 @@ mod tests {
                 last_name: "Тестов".into(),
                 mobile_phone: None,
                 birthdate: None,
+                identifier: None,
+                identifier_type: None,
             },
         }
     }
@@ -295,5 +345,54 @@ mod tests {
         assert_eq!(runtime.select_next_patient().unwrap().id, "one");
         assert_eq!(runtime.select_next_patient().unwrap().id, "two");
         assert!(runtime.select_next_patient().is_err());
+    }
+
+    #[test]
+    fn nzok_choice_is_single_use_and_patient_scoped() {
+        let runtime = AidooRuntime::new();
+        runtime.remember_nzok_choice("patient-one").unwrap();
+        assert!(!runtime.take_nzok_choice("patient-two").unwrap());
+        assert!(runtime.take_nzok_choice("patient-one").unwrap());
+        assert!(!runtime.take_nzok_choice("patient-one").unwrap());
+    }
+
+    #[test]
+    fn selected_patient_guard_rejects_an_ambiguous_search() {
+        let runtime = AidooRuntime::new();
+        runtime
+            .remember_patient_search(&[result("one", "Първи"), result("two", "Втори")])
+            .unwrap();
+
+        assert!(runtime.selected_patient("one").is_err());
+        assert!(runtime.selected_patient("two").is_err());
+    }
+
+    #[test]
+    fn selected_patient_guard_accepts_unique_or_explicit_selection() {
+        let runtime = AidooRuntime::new();
+        runtime
+            .remember_patient_search(&[result("one", "Първи")])
+            .unwrap();
+        assert_eq!(runtime.selected_patient("one").unwrap().id, "one");
+
+        runtime
+            .remember_patient_search(&[result("one", "Първи"), result("two", "Втори")])
+            .unwrap();
+        runtime.select_patient("two").unwrap();
+        assert_eq!(runtime.selected_patient("two").unwrap().id, "two");
+    }
+
+    #[test]
+    fn selected_patient_guard_rejects_a_wrong_or_stale_patient() {
+        let runtime = AidooRuntime::new();
+        runtime
+            .remember_patient_search(&[result("one", "Първи")])
+            .unwrap();
+        assert!(runtime.selected_patient("two").is_err());
+
+        runtime
+            .remember_patient_search(&[result("one", "Първи"), result("two", "Втори")])
+            .unwrap();
+        assert!(runtime.selected_patient("one").is_err());
     }
 }

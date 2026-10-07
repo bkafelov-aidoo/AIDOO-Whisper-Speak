@@ -1,4 +1,10 @@
-# AIDOO Whisper Lite
+# AIDOO Whisper Speak
+
+The voice/AI assistant product, including AIDOO patient-record workflows. The user assigned the Speak name on 2026-10-07; the dictation-only 1.0.5 product is maintained separately as [Whisper Lite](https://github.com/bkafelov-aidoo/AIDOO-Whisper-Lite).
+
+This repository preserves the current assistant source and working-method ledger. Internal application/release identities still use the historical Lite name; see [product separation](docs/PRODUCT-SEPARATION.md) for the source boundary, preserved installers and runtime-migration limitation.
+
+## Historical dictation foundation
 
 A focused macOS voice typing app. Hold a keyboard shortcut, speak, and release it to send the recording to the selected OpenAI transcription model. The result stays in the clipboard and can be pasted automatically into the active application.
 

@@ -149,10 +149,11 @@ def main() -> int:
     for entitlement in (
         "com.apple.security.device.audio-input",
         "com.apple.security.network.client",
-        "com.apple.security.automation.apple-events",
     ):
         if entitlements.get(entitlement) is not True:
             errors.append(f"Required entitlement is missing: {entitlement}")
+    if "com.apple.security.automation.apple-events" in entitlements:
+        errors.append("The app must not request Apple Events automation access")
 
     main_capabilities = json.loads(
         (ROOT / "src-tauri/capabilities/main.json").read_text()
@@ -160,10 +161,15 @@ def main() -> int:
     overlay_capabilities = json.loads(
         (ROOT / "src-tauri/capabilities/overlay.json").read_text()
     )
+    live_diagnostics_capabilities = json.loads(
+        (ROOT / "src-tauri/capabilities/live-diagnostics.json").read_text()
+    )
     if main_capabilities.get("windows") != ["main"]:
         errors.append("Main capabilities must apply only to the main window")
     if overlay_capabilities.get("windows") != ["overlay"]:
         errors.append("Overlay capabilities must apply only to the overlay window")
+    if live_diagnostics_capabilities.get("windows") != ["live-diagnostics"]:
+        errors.append("Live diagnostics capabilities must apply only to the development window")
 
     expected_external_urls = {
         "https://platform.openai.com/api-keys",
@@ -263,6 +269,7 @@ def main() -> int:
     expected_runtime_https_urls = {
         "https://api.openai.com/v1/models",
         "https://api.openai.com/v1/audio/transcriptions",
+        "https://api.openai.com/v1/audio/speech",
         "https://api.openai.com/v1/live/sessions",
         "https://app.aidoo.bg",
         "https://app.aidoo.bg/web",
@@ -273,10 +280,11 @@ def main() -> int:
         errors.append(
             f"Native runtime HTTPS destinations differ: {sorted(runtime_https_urls)}"
         )
-    if runtime_sources.count(".https_only(true)") != 4:
+    if runtime_sources.count(".https_only(true)") != 5:
         errors.append("All native API clients must reject non-HTTPS requests")
-    # Four production clients plus the HTTP-only local contract-test client.
-    if runtime_sources.count(".redirect(reqwest::redirect::Policy::none())") != 5:
+    # Five production clients, the HTTP-only local contract-test client, and the
+    # fixed-loopback NZOK signer client.
+    if runtime_sources.count(".redirect(reqwest::redirect::Policy::none())") != 7:
         errors.append("All native API clients must reject HTTP redirects")
     javascript_dependencies = {
         **package.get("dependencies", {}),
@@ -311,6 +319,7 @@ def main() -> int:
     expected_main_string_permissions = {
         "core:event:allow-listen",
         "core:event:allow-unlisten",
+        "core:event:allow-emit-to",
         "dialog:allow-open",
         "autostart:default",
         "allow-bootstrap",
@@ -324,12 +333,21 @@ def main() -> int:
         "allow-aidoo-select-patient",
         "allow-aidoo-next-patient",
         "allow-aidoo-begin-status",
+        "allow-aidoo-begin-treatment",
+        "allow-aidoo-select-treatment-tooth",
         "allow-aidoo-start-status-visit",
         "allow-aidoo-apply-status",
+        "allow-aidoo-apply-statuses",
         "allow-aidoo-finish-status",
+        "allow-aidoo-read-status",
+        "allow-aidoo-read-treatments",
+        "allow-aidoo-read-visits",
+        "allow-aidoo-read-patient-data",
+        "allow-aidoo-create-treatment",
         "allow-aidoo-add-procedure",
         "allow-aidoo-write-diagnosis",
         "allow-aidoo-write-official-note",
+        "allow-aidoo-preview-official-note",
         "allow-aidoo-find-schedule-slot",
         "allow-aidoo-book-schedule-slot",
         "allow-aidoo-status-catalog",
@@ -346,6 +364,7 @@ def main() -> int:
         "allow-begin-shortcut-capture",
         "allow-cancel-shortcut-capture",
         "allow-test-microphone",
+        "allow-preview-live-voice",
         "allow-start-wake-word-calibration",
         "allow-stop-wake-word-calibration",
         "allow-prepare-live-session",
@@ -361,6 +380,7 @@ def main() -> int:
         "allow-retry-failed-transcription",
         "allow-retranscribe-history-item",
         "allow-delete-failed-recording",
+        "allow-open-live-diagnostics",
         "allow-copy-text",
         "allow-delete-history-item",
         "allow-open-accessibility-settings",
@@ -380,17 +400,29 @@ def main() -> int:
         "core:event:allow-listen",
         "core:event:allow-unlisten",
         "core:window:allow-set-size",
+        "core:window:allow-start-dragging",
         "allow-overlay-bootstrap",
         "allow-current-recording-snapshot",
         "allow-stop-and-transcribe",
         "allow-request-live-stop",
-        "allow-reposition-overlay",
     }
     overlay_permissions = set(overlay_capabilities.get("permissions", []))
     if overlay_permissions != expected_overlay_permissions:
         errors.append(
             "Overlay permissions exceed the event-listen and set-size boundary"
         )
+
+    expected_live_diagnostics_permissions = {
+        "core:event:allow-listen",
+        "core:event:allow-unlisten",
+        "core:event:allow-emit-to",
+        "allow-copy-text",
+    }
+    live_diagnostics_permissions = set(
+        live_diagnostics_capabilities.get("permissions", [])
+    )
+    if live_diagnostics_permissions != expected_live_diagnostics_permissions:
+        errors.append("Live diagnostics permissions exceed the in-memory event boundary")
 
     build_source = (ROOT / "src-tauri/build.rs").read_text()
     manifest_match = re.search(
@@ -442,7 +474,10 @@ def main() -> int:
     )
     allowed_commands = {
         permission.removeprefix("allow-").replace("-", "_")
-        for permission in main_string_permissions | overlay_permissions
+        for permission in (
+            main_string_permissions
+            | overlay_permissions
+        )
         if permission.startswith("allow-")
     }
     if not manifest_commands or manifest_commands != handler_commands:
@@ -552,7 +587,7 @@ def main() -> int:
     for required_release_command in (
         "cargo test --locked --release --target aarch64-apple-darwin",
         "cargo clippy --locked --release --target aarch64-apple-darwin",
-        "npx tauri build --target aarch64-apple-darwin --bundles app,dmg --ci -- --locked",
+        "npx tauri build --target aarch64-apple-darwin --bundles app --ci -- --locked",
     ):
         if required_release_command not in release_script:
             errors.append(f"Local release command is missing: {required_release_command}")

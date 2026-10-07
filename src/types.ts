@@ -5,6 +5,7 @@ export interface AppSettings {
   uiLanguage: "auto" | "bg" | "en";
   language: string;
   model: "gpt-4o-mini-transcribe" | "gpt-transcribe";
+  liveVoice: "marin" | "cedar" | "coral" | "sage" | "alloy";
   autoPaste: boolean;
   saveAudio: boolean;
   saveText: boolean;
@@ -110,6 +111,7 @@ export interface BootstrapState {
   aidooConnected: boolean;
   aidooConnectionError: string | null;
   accessibilityGranted: boolean;
+  diagnosticsAvailable: boolean;
   appVersion: string;
   defaultOutputDirectory: string;
   recording: RecordingSnapshot;

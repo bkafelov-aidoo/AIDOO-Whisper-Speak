@@ -7,6 +7,7 @@ use std::time::Duration;
 
 const PRODUCTION_API_BASE: &str = "https://app.aidoo.bg/web";
 const TEST_API_BASE: &str = "https://aidoo-platform.on.dev-craft.tech/web";
+const LOCAL_SIGNER_BASE: &str = "http://localhost:4567";
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,16 +138,126 @@ impl AidooClient {
         .await
     }
 
+    pub async fn patient_details(
+        &self,
+        session: &str,
+        clinic_id: &str,
+        patient_id: &str,
+    ) -> Result<PatientSummary, AidooError> {
+        self.send_json(self.authorized(
+            Method::GET,
+            session,
+            &patient_path(clinic_id, patient_id, "")?,
+        ))
+        .await
+    }
+
+    pub async fn patient_record_details(
+        &self,
+        session: &str,
+        clinic_id: &str,
+        patient_id: &str,
+    ) -> Result<PatientRecordDetails, AidooError> {
+        self.send_json(self.authorized(
+            Method::GET,
+            session,
+            &patient_path(clinic_id, patient_id, "")?,
+        ))
+        .await
+    }
+
+    pub async fn nzis_status_search_xml(
+        &self,
+        session: &str,
+        clinic_id: &str,
+        patient_id: &str,
+    ) -> Result<String, AidooError> {
+        self.send_text(self.authorized(
+            Method::GET,
+            session,
+            &format!("/clinics/{clinic_id}/nzok-checks/patients/{patient_id}/nzis-search-xml"),
+        ))
+        .await
+    }
+
+    pub async fn sign_nzis_xml(&self, xml: &str) -> Result<String, AidooError> {
+        let response = local_signer_client()?
+            .post(format!("{LOCAL_SIGNER_BASE}/sign"))
+            .header("Content-Type", "application/xml; charset=UTF-8")
+            .body(xml.to_string())
+            .send()
+            .await
+            .map_err(local_signer_transport_error)?;
+        local_text_response(response).await
+    }
+
+    pub async fn nhif_four_year_data(
+        &self,
+        patient_identifier: &str,
+        person_type: &str,
+    ) -> Result<serde_json::Value, AidooError> {
+        let response = local_signer_client()?
+            .post(format!("{LOCAL_SIGNER_BASE}/nhif/query-four-year-data"))
+            .header("Content-Type", "application/xml; charset=UTF-8")
+            .json(&serde_json::json!({
+                "patientId": patient_identifier,
+                "personType": person_type,
+            }))
+            .send()
+            .await
+            .map_err(local_signer_transport_error)?;
+        local_json_response(response).await
+    }
+
+    pub async fn has_available_status_check(
+        &self,
+        session: &str,
+        clinic_id: &str,
+        signed_nzis_xml: &str,
+        nzok_data: &serde_json::Value,
+    ) -> Result<bool, AidooError> {
+        validate_id(clinic_id, "клиника")?;
+        self.send_json(
+            self.authorized(
+                Method::POST,
+                session,
+                &format!("/clinics/{clinic_id}/nzok-checks/has-status-checks"),
+            )
+            .json(&NzokStatusCheckRequest {
+                signed_nzis_xml,
+                nzok_data,
+            }),
+        )
+        .await
+    }
+
     pub async fn active_visit(
         &self,
         session: &str,
         clinic_id: &str,
         patient_id: &str,
     ) -> Result<Visit, AidooError> {
+        self.send_json_with_options(
+            self.authorized(
+                Method::GET,
+                session,
+                &patient_path(clinic_id, patient_id, "/visits/active")?,
+            ),
+            true,
+        )
+        .await
+    }
+
+    pub async fn visits(
+        &self,
+        session: &str,
+        clinic_id: &str,
+        patient_id: &str,
+    ) -> Result<Vec<VisitStatusReference>, AidooError> {
         self.send_json(self.authorized(
             Method::GET,
             session,
-            &patient_path(clinic_id, patient_id, "/visits/active")?,
+            &patient_path(clinic_id, patient_id, "/visits")?,
         ))
         .await
     }
@@ -327,8 +438,10 @@ impl AidooClient {
         patient_id: &str,
         visit_id: &str,
         treatment: &TreatmentWrite,
+        procedure: Option<&ProcedureWrite>,
     ) -> Result<VisitTreatment, AidooError> {
         validate_id(visit_id, "посещение")?;
+        let request = CreateTreatmentRequest::new(treatment, procedure);
         self.send_json(
             self.authorized(
                 Method::POST,
@@ -339,7 +452,7 @@ impl AidooClient {
                     &format!("/visits/{visit_id}/treatments"),
                 )?,
             )
-            .json(treatment),
+            .json(&request),
         )
         .await
     }
@@ -466,6 +579,46 @@ impl AidooClient {
         &self,
         request: RequestBuilder,
     ) -> Result<T, AidooError> {
+        self.send_json_with_options(request, false).await
+    }
+
+    async fn send_json_with_options<T: DeserializeOwned>(
+        &self,
+        request: RequestBuilder,
+        bad_request_means_not_found: bool,
+    ) -> Result<T, AidooError> {
+        let response = request.send().await.map_err(|error| AidooError {
+            kind: AidooErrorKind::Transport,
+            message: format!("AIDOO не отговори: {error}"),
+        })?;
+        let status = response.status();
+        let body = read_limited(response).await?;
+        if status == StatusCode::UNAUTHORIZED {
+            return Err(AidooError::authentication());
+        }
+        if !status.is_success() {
+            let missing_active_visit =
+                bad_request_means_not_found && status == StatusCode::BAD_REQUEST;
+            return Err(AidooError {
+                kind: if status == StatusCode::NOT_FOUND || missing_active_visit {
+                    AidooErrorKind::NotFound
+                } else {
+                    AidooErrorKind::Http
+                },
+                message: if missing_active_visit {
+                    "Няма активно посещение за този пациент.".into()
+                } else {
+                    public_http_error(status)
+                },
+            });
+        }
+        serde_json::from_slice(&body).map_err(|_| AidooError {
+            kind: AidooErrorKind::Protocol,
+            message: "AIDOO върна неочакван отговор.".into(),
+        })
+    }
+
+    async fn send_text(&self, request: RequestBuilder) -> Result<String, AidooError> {
         let response = request.send().await.map_err(|error| AidooError {
             kind: AidooErrorKind::Transport,
             message: format!("AIDOO не отговори: {error}"),
@@ -485,9 +638,12 @@ impl AidooClient {
                 message: public_http_error(status),
             });
         }
-        serde_json::from_slice(&body).map_err(|_| AidooError {
+        if let Ok(value) = serde_json::from_slice::<String>(&body) {
+            return Ok(value);
+        }
+        String::from_utf8(body).map_err(|_| AidooError {
             kind: AidooErrorKind::Protocol,
-            message: "AIDOO върна неочакван отговор.".into(),
+            message: "AIDOO върна невалиден XML отговор.".into(),
         })
     }
 
@@ -513,6 +669,58 @@ impl AidooClient {
         }
         Ok(())
     }
+}
+
+fn local_signer_client() -> Result<reqwest::Client, AidooError> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|_| AidooError {
+            kind: AidooErrorKind::Protocol,
+            message: "Локалната НЗОК проверка не можа да бъде подготвена.".into(),
+        })
+}
+
+fn local_signer_transport_error(_: reqwest::Error) -> AidooError {
+    AidooError {
+        kind: AidooErrorKind::Transport,
+        message: "НЗОК проверката изисква стартирано локално приложение за електронен подпис."
+            .into(),
+    }
+}
+
+async fn local_text_response(response: reqwest::Response) -> Result<String, AidooError> {
+    let status = response.status();
+    let body = read_limited(response).await?;
+    if !status.is_success() {
+        return Err(AidooError {
+            kind: AidooErrorKind::Http,
+            message: "Локалното приложение не успя да подпише НЗОК проверката.".into(),
+        });
+    }
+    String::from_utf8(body).map_err(|_| AidooError {
+        kind: AidooErrorKind::Protocol,
+        message: "Локалното приложение върна невалиден подпис.".into(),
+    })
+}
+
+async fn local_json_response<T: DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, AidooError> {
+    let status = response.status();
+    let body = read_limited(response).await?;
+    if !status.is_success() {
+        return Err(AidooError {
+            kind: AidooErrorKind::Http,
+            message: "Локалното приложение не успя да изпълни НЗОК проверката.".into(),
+        });
+    }
+    serde_json::from_slice(&body).map_err(|_| AidooError {
+        kind: AidooErrorKind::Protocol,
+        message: "Локалното приложение върна невалиден НЗОК отговор.".into(),
+    })
 }
 
 async fn read_limited(response: reqwest::Response) -> Result<Vec<u8>, AidooError> {

@@ -99,9 +99,10 @@ test "$(plutil -extract LSMinimumSystemVersion raw "$app/Contents/Info.plist")" 
 test "$(plutil -extract NSMicrophoneUsageDescription raw "$app/Contents/Info.plist")" = 'AIDOO Whisper Lite uses your selected microphone for dictation and testing. If you enable Hey, AIDOO, wake-phrase detection stays local on this Mac.'
 test "$(plutil -extract NSMicrophoneUsageDescription raw "$app/Contents/Resources/en.lproj/InfoPlist.strings")" = 'AIDOO Whisper Lite uses your selected microphone for dictation and testing. If you enable Hey, AIDOO, wake-phrase detection stays local on this Mac.'
 test "$(plutil -extract NSMicrophoneUsageDescription raw "$app/Contents/Resources/bg.lproj/InfoPlist.strings")" = 'AIDOO Whisper Lite използва избрания микрофон за диктовка и тест. Ако включите Hey, AIDOO, разпознаването на фразата остава локално на този Mac.'
-test "$(plutil -extract NSAppleEventsUsageDescription raw "$app/Contents/Info.plist")" = 'AIDOO Whisper Lite uses browser automation to show and refresh the relevant AIDOO Kontrol patient screen after confirmed changes.'
-test "$(plutil -extract NSAppleEventsUsageDescription raw "$app/Contents/Resources/en.lproj/InfoPlist.strings")" = 'AIDOO Whisper Lite uses browser automation to show and refresh the relevant AIDOO Kontrol patient screen after confirmed changes.'
-test "$(plutil -extract NSAppleEventsUsageDescription raw "$app/Contents/Resources/bg.lproj/InfoPlist.strings")" = 'AIDOO Whisper Lite използва автоматизация на браузъра, за да показва и обновява правилния пациентски екран в AIDOO Kontrol след потвърдени промени.'
+if plutil -extract NSAppleEventsUsageDescription raw "$app/Contents/Info.plist" >/dev/null 2>&1; then
+  echo 'Unexpected Apple Events permission description in the application bundle.' >&2
+  exit 1
+fi
 test -f "$app/Contents/Resources/THIRD_PARTY_NOTICES.txt"
 cmp -s "$app/Contents/Resources/icon.icns" "$project_root/src-tauri/icons/icon.icns"
 
@@ -117,6 +118,9 @@ printf '%s' "$dmg_signature" | grep -Fq 'TeamIdentifier=4KKVT2TUUA'
 entitlements="$(codesign -d --entitlements :- "$app" 2>/dev/null)"
 printf '%s' "$entitlements" | grep -q 'com.apple.security.device.audio-input'
 printf '%s' "$entitlements" | grep -q 'com.apple.security.network.client'
-printf '%s' "$entitlements" | grep -q 'com.apple.security.automation.apple-events'
+if printf '%s' "$entitlements" | grep -q 'com.apple.security.automation.apple-events'; then
+  echo 'Unexpected Apple Events entitlement in the application signature.' >&2
+  exit 1
+fi
 
 printf 'AIDOO Whisper Lite macOS release audit passed: %s\n' "$dmg"

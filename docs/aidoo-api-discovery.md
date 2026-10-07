@@ -23,7 +23,7 @@ For each step, use a designated test patient and keep the browser Network panel 
 6. Add one surface-level status, then verify it.
 7. Replace one existing status, then verify it.
 8. Apply a controlled multiple-status change, then verify every item.
-9. Observe deletion only to understand the contract. Voice deletion is outside V1.
+9. Observe removal of one selected status to establish replacement semantics. Deletion of an entire visit's status remains outside the Lite voice flow.
 
 ## Evidence template
 
@@ -70,6 +70,55 @@ The deployed test frontend bundles were inspected after the browser debugger sto
 
 The Lite client implements these fixed routes, exact write shapes, a pre-write snapshot comparison, and separate post-write read-backs. A transport timeout triggers one read-back and never an automatic second write. A composite diagnosis/procedure/note action reports partial or uncertain state if one write succeeds and a later write fails.
 
+### Production NZOK and milk-tooth contract extraction (2026-09-17)
+
+The deployed production frontend bundles were inspected without retaining any patient values, session tokens, signed XML or NHIF response data.
+
+- Clinic capability comes from authenticated `user.clinic.worksWithNzok`.
+- Before offering an NZOK status visit, the frontend gets `GET /clinics/{clinicId}/nzok-checks/patients/{patientId}/nzis-search-xml`, signs that XML through `POST http://localhost:4567/sign`, gets four-year NHIF data through `POST http://localhost:4567/nhif/query-four-year-data`, and sends `{ signedNzisXml, nzokData }` to `POST /clinics/{clinicId}/nzok-checks/has-status-checks`.
+- The funding-choice dialog is shown only when the clinic works with NZOK and `has-status-checks` returns `true`. Otherwise the frontend starts a private status visit directly.
+- A milk tooth is not sent as 51–85. The write retains the base chart tooth 11–45 and sets `isMilkTooth=true`; the UI displays it by adding 40 to the base number. Clicking the tooth-number label toggles this flag. Positions 6–8 cannot be toggled to milk teeth.
+- `forObservation` belongs to the whole-tooth status row. Surface rows force both `isMilkTooth=false` and `forObservation=false`.
+- The status write already accepts `teethStatus[]`; several dictated changes are therefore grouped into one PUT, one read-back and one visible refresh.
+- A new treatment row can carry its diagnosis in the row POST and then receive one or more procedure POSTs. The voice operation performs the full composite sequence before its single visible refresh and verifies the resulting row once.
+
+### Individual-status removal and replacement (2026-10-03)
+
+Source-level evidence from production `MedicalRecordPage.131f6f40.js` (SHA-256 `a9ac84976f06cc681391a1a980d9718698a41c4aef96359d9141804f17c30234`), distinct from a controlled successful Network write:
+
+- Removing one status collects the rows matching the tooth and exact sorted region set, unions their status IDs, removes only the selected ID, and sends the resulting exact set through ordinary `PUT .../teeth-status?visitId={visitId}` with `{ teethStatus: [row] }`. Removing the last status sends `statuses: []`.
+- Adding a status unions the existing IDs with the new ID before that same PUT. Consequently, a replacement can remove the old ID and insert the new ID in one exact-set write; separate delete/add requests are not required.
+- The bundle's `DELETE .../teeth-status?visitId={visitId}` has no per-tooth body and belongs to cancellation of the visit's whole status. It is not used for replacing one selected status.
+- The user supplied a Network screenshot showing the `teeth-status?visitId=...` route and a successful `200` response, then a removal request copied as cURL. The supplied request explicitly uses PUT and sends two rows for one tooth: a whole-tooth row with `regions: []` and a surface row with two regions, both with `statuses: []`, false milk/observation flags and `note: null`. It also includes read-response metadata (`id`, `timestamp`, `generatedByProcedure`); the source-extracted ordinary write shape omits those fields. This corroborates exact-set removal, not an HTTP DELETE. The request was not replayed, and no token or patient/visit/clinic identifiers are retained here; no response/read-back for that exact request was supplied.
+- Replacement preserves unrelated statuses and the affected row's metadata. A move to another region set touches both the source and destination rows in the same PUT. Ambiguous old-status locations or conflicting duplicate-row metadata must be rejected before any write, rather than guessed.
+- All replacements in one dictated group resolve against the initial snapshot. Old IDs are removed before new IDs are added, then one independent read-back and one visible same-tab refresh verify the complete group. This is locally contract-tested behavior, not proof of installed-app clinical completion.
+
+### Treatment signature continuation and dictated row note (2026-10-03)
+
+Source-level evidence from the production `MedicalRecordPage.131f6f40.js` bundle, not a controlled clinical write:
+
+- The exact „Продължи без подпис“ UI button calls the `electronic-signature` store's `skipSignature()` and closes the dialog. That action sets the local `skippedSignature` flag; it does not send a request or add a treatment/procedure API parameter.
+- The continuation is therefore a guarded UI action in the bound patient tab, not a new endpoint, forged signature or write payload option.
+- The Treatment table has distinct „Процедури“ and „Забележки“ columns. Its „Добави забележка“ control opens the „Забележка“ side panel and edits the treatment row's `note`, distinct from a visit's internal note.
+- Final dictation remains a verified treatment-row API write. A visual transcript is only a preview and must not also submit the side-panel Save action.
+- Automatic sidebar opening and full visible procedure/note completion are not established by this static contract. They require exact row targeting and an installed-app test; an unproved preview target keeps the overlay fallback.
+
+### Active treatment visit and procedure entry (2026-10-03)
+
+The user supplied production cURL captures for the following schemas; none was replayed, and credentials and patient/clinic/visit identifiers are not retained:
+
+- „Ново лечение“ is `POST .../patients/{patientId}/visits` with only `{ doctorId }`. This creates the active visit, not a tooth row. The selected doctor is the authenticated session's doctor.
+- The fresh-row `POST .../visits/{visitId}/treatments` capture carries `tooth`, nullable `diagnosisId`, `treatmentId`, `note`, `procedures`, `nzis`, `nhif` and `isMilkTooth`. Its procedure item contains textual `price` and `discount`.
+- A procedure on an existing row is `POST .../treatments/{rowId}/procedures` with `{ procedureId, price, discount }`, again with textual amounts.
+
+The cached paired production frontend chunks further establish ordering: a tooth-body click changes local selection and the router query without HTTP; the number label separately toggles milk-tooth status. When selecting a procedure on an unsaved row, the UI first creates the row containing a blank placeholder, then assigns the catalog ID/price and sends the separate procedure POST, finally re-reading the rows. The captures alone do not prove that embedding a selected procedure in the row POST substitutes for the separate procedure request.
+
+The historical `T2` candidate instead sent an empty procedure array. The user reported failed Treatment saving with that installed candidate. `T4` now follows the supplied production capture: the fresh row contains the first chosen procedure ID with textual zero price/discount, followed by each intended separate procedure POST exactly once and independent read-back. The capture proves a single placeholder, not a grouped fresh-row array. Diagnosis-only/note-only fresh rows still have no procedure placeholder; their production acceptance remains unverified. Existing-row update payloads do not acquire fresh-row flags or embedded procedures.
+
+The procedure response contains `procedure` and an optional `treatmentId`; the deployed UI assigns that returned treatment ID to the row. Verification must retain that exact ID, the known created row ID, milk/permanent identity and status, and finalized procedure IDs with intended price/discount. A placeholder alone is not proof that a rejected procedure POST succeeded. An unknown created-row ID after an ambiguous/undecodable response remains uncertain and is not retried.
+
+Current loaded production assets were rechecked read-only on 2026-10-03 as `index.a60a25bb.js` and `MedicalRecordPage.131f6f40.js`. `TreatmentTable` has async setup: the signature availability check resolves and sets the warning-dialog state before its table headers render. The full AX scan gives that exact enabled warning button precedence over header readiness. This source contract supports three stable ready polls without waiting for the entire hydration timeout; a future change to modal timing needs renewed UI evidence. No clinical write was performed during this inspection.
+
 ### Schedule read and write contract (2026-09-17)
 
 The deployed schedule page was reloaded with the Network domain enabled. Only request paths, payload schemas and response schemas were retained; no patient, user, clinic or appointment values were copied.
@@ -97,11 +146,13 @@ All identifiers below are route placeholders. No observed patient, visit, clinic
 
 ### Patient medical-record route
 
-- Observed browser route:
-  `/clinics/{clinicSlug}/medical-record?patientid={patientId}&tab=record&mode={treatment|status}&selectedTeeth=&triggerNzokChecksProp=true`
+- Canonical patient-record route:
+  `/clinics/{clinicSlug}/medical-record?patientid={patientId}&tab=record&mode=treatment`
+- Status-editing route:
+  `/clinics/{clinicSlug}/medical-record?patientid={patientId}&tab=record&mode=status&selectedTeeth=&triggerNzokChecksProp=true`
 - Switching between `mode=treatment` and `mode=status` changed the visible table without issuing another API request once the page data was loaded.
 - A clean reload of `mode=status` issued the patient, visits, and teeth-status reads described below.
-- AIDOO Control presents this route before confirmation and navigates it again after each write attempt. It appends an `aidooControlSync` cache-busting query value so the frontend performs a fresh load while preserving the observed route parameters.
+- AIDOO Control opens the canonical treatment route when a patient is selected. It appends an `aidooControlSync` cache-busting query value to both treatment and status navigation. Direct network navigation to a `/clinics/...` route currently returns `403`; successful deep-link loading depends on AIDOO's Workbox navigation response. The deployed Workbox cache has also been observed with a stale `index.html` body under the current revision key, pointing at a removed hashed bundle. Before navigating, AIDOO Control therefore fetches only `/index.html` with browser-cache reload semantics, replaces only the matching `index.html` entry in AIDOO's own precache, and then navigates to the canonical deep link. It does not clear cookies, local storage, clinical data, or unrelated browser caches. The treatment route does not include the status-only `selectedTeeth` or `triggerNzokChecksProp` parameters.
 
 ### Patient search
 

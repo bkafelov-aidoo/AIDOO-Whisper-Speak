@@ -4,15 +4,17 @@ use std::path::Path;
 pub const ECONOMY_MODEL: &str = "gpt-4o-mini-transcribe";
 pub const ACCURACY_MODEL: &str = "gpt-transcribe";
 pub const LIVE_MODEL: &str = "gpt-live-1";
-pub const LIVE_BACKEND_MODEL: &str = "gpt-5.6-terra";
+pub const LIVE_BACKEND_MODEL: &str = "gpt-6-luna";
+pub const DEFAULT_LIVE_VOICE: &str = "marin";
+pub const LIVE_VOICES: &[&str] = &["marin", "cedar", "coral", "sage", "alloy"];
 pub const ECONOMY_RATE_NANO_USD_PER_MINUTE: u64 = 3_000_000;
 pub const ACCURACY_RATE_NANO_USD_PER_MINUTE: u64 = 4_500_000;
 pub const LIVE_RATE_NANO_USD_PER_MINUTE: u64 = 50_000_000;
-const TERRA_INPUT_NANO_USD_PER_TOKEN: u64 = 2_000;
-const TERRA_CACHED_INPUT_NANO_USD_PER_TOKEN: u64 = 200;
-const TERRA_CACHE_WRITE_NANO_USD_PER_TOKEN: u64 = 2_500;
-const TERRA_OUTPUT_NANO_USD_PER_TOKEN: u64 = 12_000;
-const TERRA_LONG_CONTEXT_THRESHOLD: u64 = 272_000;
+const LUNA_INPUT_NANO_USD_PER_TOKEN: u64 = 100;
+const LUNA_CACHED_INPUT_NANO_USD_PER_TOKEN: u64 = 10;
+const LUNA_CACHE_WRITE_NANO_USD_PER_TOKEN: u64 = 125;
+const LUNA_OUTPUT_NANO_USD_PER_TOKEN: u64 = 500;
+const LUNA_LONG_CONTEXT_THRESHOLD: u64 = 272_000;
 const SUPPORTED_LANGUAGES: &[&str] = &["auto", "bg", "en", "de", "es", "fr", "it"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -41,6 +43,7 @@ pub struct AppSettings {
     pub ui_language: String,
     pub language: String,
     pub model: String,
+    pub live_voice: String,
     pub auto_paste: bool,
     pub save_audio: bool,
     pub save_text: bool,
@@ -65,6 +68,7 @@ impl Default for AppSettings {
             ui_language: "auto".into(),
             language: "bg".into(),
             model: ECONOMY_MODEL.into(),
+            live_voice: DEFAULT_LIVE_VOICE.into(),
             auto_paste: true,
             save_audio: true,
             save_text: true,
@@ -88,6 +92,9 @@ impl AppSettings {
     pub fn normalize(&mut self) {
         if !matches!(self.model.as_str(), ECONOMY_MODEL | ACCURACY_MODEL) {
             self.model = ECONOMY_MODEL.into();
+        }
+        if !LIVE_VOICES.contains(&self.live_voice.as_str()) {
+            self.live_voice = DEFAULT_LIVE_VOICE.into();
         }
         if !SUPPORTED_LANGUAGES.contains(&self.language.as_str()) {
             self.language = "auto".into();
@@ -123,8 +130,8 @@ fn normalized_optional(value: Option<String>) -> Option<String> {
 mod tests {
     use super::{
         cost_nano_usd, live_backend_cost_nano_usd, AppSettings, FailedRecording, LiveBackendUsage,
-        UsageLedger, ACCURACY_MODEL, ACCURACY_RATE_NANO_USD_PER_MINUTE, ECONOMY_MODEL,
-        ECONOMY_RATE_NANO_USD_PER_MINUTE, LIVE_BACKEND_MODEL, LIVE_MODEL,
+        UsageLedger, ACCURACY_MODEL, ACCURACY_RATE_NANO_USD_PER_MINUTE, DEFAULT_LIVE_VOICE,
+        ECONOMY_MODEL, ECONOMY_RATE_NANO_USD_PER_MINUTE, LIVE_BACKEND_MODEL, LIVE_MODEL,
         LIVE_RATE_NANO_USD_PER_MINUTE,
     };
 
@@ -132,6 +139,7 @@ mod tests {
     fn production_model_aliases_remain_stable() {
         assert_eq!(ECONOMY_MODEL, "gpt-4o-mini-transcribe");
         assert_eq!(ACCURACY_MODEL, "gpt-transcribe");
+        assert_eq!(LIVE_BACKEND_MODEL, "gpt-6-luna");
 
         let mut settings = AppSettings {
             model: ACCURACY_MODEL.into(),
@@ -145,6 +153,7 @@ mod tests {
     fn normalize_rejects_unknown_model_and_language() {
         let mut settings = AppSettings {
             model: "unknown-model".into(),
+            live_voice: "unknown-voice".into(),
             language: "made-up-language".into(),
             ui_language: "unsupported".into(),
             output_directory: Some("relative/output".into()),
@@ -155,6 +164,7 @@ mod tests {
         settings.normalize();
 
         assert_eq!(settings.model, ECONOMY_MODEL);
+        assert_eq!(settings.live_voice, DEFAULT_LIVE_VOICE);
         assert_eq!(settings.language, "auto");
         assert_eq!(settings.ui_language, "auto");
         assert_eq!(settings.output_directory, None);
@@ -226,14 +236,14 @@ mod tests {
             cache_write_tokens: 100,
             output_tokens: 50,
         };
-        assert_eq!(live_backend_cost_nano_usd(&backend), Some(2_290_000));
+        assert_eq!(live_backend_cost_nano_usd(&backend), Some(109_500));
 
         let mut usage = UsageLedger::default();
         let entry = usage
             .record_live_backend("2026-09-17T10:00:00Z".into(), LIVE_BACKEND_MODEL, &backend)
             .unwrap();
         assert_eq!(entry.kind, "liveBackend");
-        assert_eq!(usage.live_backend_cost_nano_usd, 2_290_000);
+        assert_eq!(usage.live_backend_cost_nano_usd, 109_500);
         assert_eq!(usage.live_backend_response_count, 1);
         assert_eq!(usage.live_backend_input_tokens, 1_000);
         assert_eq!(usage.live_backend_output_tokens, 50);
@@ -255,7 +265,7 @@ mod tests {
             cache_write_tokens: 0,
             output_tokens: 10,
         };
-        assert_eq!(live_backend_cost_nano_usd(&long), Some(1_088_184_000));
+        assert_eq!(live_backend_cost_nano_usd(&long), Some(54_407_700));
     }
 }
 
@@ -428,18 +438,18 @@ pub fn live_backend_cost_nano_usd(usage: &LiveBackendUsage) -> Option<u64> {
         .cached_input_tokens
         .checked_add(usage.cache_write_tokens)?;
     let uncached = usage.input_tokens.checked_sub(discounted)?;
-    let long_context = usage.input_tokens > TERRA_LONG_CONTEXT_THRESHOLD;
+    let long_context = usage.input_tokens > LUNA_LONG_CONTEXT_THRESHOLD;
     let input_multiplier = if long_context { 2_u128 } else { 1 };
     let output_numerator = if long_context { 3_u128 } else { 2 };
-    let cost = u128::from(uncached) * u128::from(TERRA_INPUT_NANO_USD_PER_TOKEN) * input_multiplier
+    let cost = u128::from(uncached) * u128::from(LUNA_INPUT_NANO_USD_PER_TOKEN) * input_multiplier
         + u128::from(usage.cached_input_tokens)
-            * u128::from(TERRA_CACHED_INPUT_NANO_USD_PER_TOKEN)
+            * u128::from(LUNA_CACHED_INPUT_NANO_USD_PER_TOKEN)
             * input_multiplier
         + u128::from(usage.cache_write_tokens)
-            * u128::from(TERRA_CACHE_WRITE_NANO_USD_PER_TOKEN)
+            * u128::from(LUNA_CACHE_WRITE_NANO_USD_PER_TOKEN)
             * input_multiplier
         + u128::from(usage.output_tokens)
-            * u128::from(TERRA_OUTPUT_NANO_USD_PER_TOKEN)
+            * u128::from(LUNA_OUTPUT_NANO_USD_PER_TOKEN)
             * output_numerator
             / 2;
     Some(cost.min(u128::from(u64::MAX)) as u64)
@@ -510,6 +520,7 @@ pub struct BootstrapState {
     pub aidoo_connected: bool,
     pub aidoo_connection_error: Option<String>,
     pub accessibility_granted: bool,
+    pub diagnostics_available: bool,
     pub app_version: String,
     pub default_output_directory: String,
     pub recording: RecordingSnapshot,

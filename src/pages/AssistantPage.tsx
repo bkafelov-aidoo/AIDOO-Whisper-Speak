@@ -1,14 +1,15 @@
-import { AudioLines, Link2, MessageCircle, Mic, Square } from "lucide-react";
+import { AudioLines, Bug, Link2, MessageCircle, Mic, Square } from "lucide-react";
 import { translator } from "../i18n";
 import type { AppLanguage } from "../types";
 import type { LiveConversationState } from "../hooks/useLiveConversation";
 
-export function AssistantPage({ live, language, available, dictationBusy, aidooConnected }: {
+export function AssistantPage({ live, language, available, dictationBusy, aidooConnected, onOpenDiagnostics }: {
   live: LiveConversationState;
   language: AppLanguage;
   available: boolean;
   dictationBusy: boolean;
   aidooConnected: boolean;
+  onOpenDiagnostics?: () => void;
 }) {
   const t = translator(language);
   const active = !["idle", "error"].includes(live.phase);
@@ -25,7 +26,10 @@ export function AssistantPage({ live, language, available, dictationBusy, aidooC
   return <div className="page assistant-page">
     <header className="page-header">
       <div><span className="eyebrow">GPT-LIVE-1</span><h1>{t("assistant")}</h1><p>{t("assistantTagline")}</p></div>
-      <span className={`assistant-mode-pill ${active ? "active" : ""}`}><MessageCircle />{t("assistantMode")}</span>
+      <div className="assistant-header-actions">
+        {onOpenDiagnostics && <button className="secondary-button assistant-diagnostics-button" onClick={onOpenDiagnostics}><Bug />{t("liveDiagnosticsOpen")}</button>}
+        <span className={`assistant-mode-pill ${active ? "active" : ""}`}><MessageCircle />{t("assistantMode")}</span>
+      </div>
     </header>
     <section className={`assistant-stage ${live.phase}`} aria-live="polite">
       <div className="assistant-orb" aria-hidden="true">

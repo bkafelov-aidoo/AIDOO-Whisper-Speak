@@ -69,7 +69,9 @@ pub(super) fn install_wake_word_events(app: AppHandle) {
                             "wake word detected; confidence={confidence:.3}"
                         ));
                         state.assistant_start_request.request();
-                        show_main_window(&app, false);
+                        // Keep the loaded main WebView transparent and non-interactive until it
+                        // hands the microphone to GPT-Live. The clinician sees only the overlay.
+                        sync_main_window_for_live_phase(&app, wake_activation_window_phase());
                         let _ = app.emit("assistant:requested", ());
                     }
                     wake_word::WakeWordEvent::Scores {

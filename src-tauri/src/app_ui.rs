@@ -812,7 +812,12 @@ pub(super) fn overlay_visible_for_state(state: &str) -> bool {
 }
 
 pub(super) fn overlay_accepts_pointer_input(state: &str) -> bool {
-    matches!(state, "starting" | "recording")
+    overlay_visible_for_state(state)
+}
+
+#[tauri::command]
+pub(super) fn current_recording_snapshot(state: State<'_, AppState>) -> RecordingSnapshot {
+    recording_snapshot(&state)
 }
 
 pub(super) fn set_recording_state(app: &AppHandle, next: &str) {
@@ -921,7 +926,11 @@ pub(crate) fn show_recording_overlay(app: &AppHandle) {
             .map(|state| state.clone())
             .unwrap_or_default();
         let _ = window.set_ignore_cursor_events(!overlay_accepts_pointer_input(&state));
-        reposition_overlay_inner(app);
+        // Place a newly shown overlay beside the macOS notification area. Once visible, keep
+        // the user's dragged position stable while its content and height change.
+        if !window.is_visible().unwrap_or(false) {
+            reposition_overlay_inner(app);
+        }
         let _ = window.show();
     }
     emit_snapshot(app);
@@ -941,12 +950,7 @@ fn reposition_overlay_inner(app: &AppHandle) {
         return;
     };
     let work_area = monitor.work_area();
-    let x = work_area.position.x + (work_area.size.width.saturating_sub(size.width) / 2) as i32;
-    let y = work_area.position.y + work_area.size.height.saturating_sub(size.height + 18) as i32;
+    let x = work_area.position.x + work_area.size.width.saturating_sub(size.width) as i32;
+    let y = work_area.position.y;
     let _ = window.set_position(PhysicalPosition::new(x, y));
-}
-
-#[tauri::command]
-pub(super) fn reposition_overlay(app: AppHandle) {
-    reposition_overlay_inner(&app);
 }

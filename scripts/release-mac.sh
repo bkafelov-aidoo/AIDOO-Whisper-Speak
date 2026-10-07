@@ -59,12 +59,13 @@ cargo test --locked --release --target aarch64-apple-darwin --manifest-path src-
 cargo clippy --locked --release --target aarch64-apple-darwin --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 # The release scripts notarize the stapled app first, then rebuild and notarize
 # the DMG. Keep Tauri's automatic notarization disabled so CI and local releases
-# use this exact sequence once.
-npx tauri build --target aarch64-apple-darwin --bundles app,dmg --ci -- --locked
+# use this exact sequence once. Build only the app here: the one distributable DMG is created
+# below after the app has its stapled notarization ticket.
+npx tauri build --target aarch64-apple-darwin --bundles app --ci -- --locked
 
 dmg="$CARGO_TARGET_DIR/aarch64-apple-darwin/release/bundle/dmg/AIDOO Whisper Lite_${version}_aarch64.dmg"
 app="$CARGO_TARGET_DIR/aarch64-apple-darwin/release/bundle/macos/AIDOO Whisper Lite.app"
-test -f "$dmg" && test -d "$app"
+test -d "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
 file "$app/Contents/MacOS/aidoo-whisper-lite" | grep -q 'arm64'
 test "$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")" = 'app.aidoo.whisper-lite'
@@ -97,6 +98,7 @@ PY
 trap cleanup EXIT
 ditto "$app" "$dmg_staging/$(basename "$app")"
 ln -s /Applications "$dmg_staging/Applications"
+mkdir -p "$(dirname "$dmg")"
 python3 - "$dmg" <<'PY'
 from pathlib import Path
 import sys

@@ -8,7 +8,10 @@ mod commands;
 mod dictation;
 mod feedback_sound;
 mod live;
+mod live_diagnostics;
+mod live_window;
 mod recovery;
+mod speech;
 mod wake_runtime;
 mod wake_word;
 
@@ -18,7 +21,10 @@ use aidoo::schedule::*;
 use app_ui::*;
 use commands::*;
 use dictation::*;
+use live_diagnostics::*;
+use live_window::*;
 use recovery::*;
+use speech::*;
 use usage::*;
 use wake_runtime::*;
 
@@ -173,6 +179,13 @@ impl AppState {
             api_key: Mutex::new(api_key),
         }
     }
+
+    fn live_voice(&self) -> Result<String, String> {
+        self.settings
+            .lock()
+            .map(|settings| settings.live_voice.clone())
+            .map_err(|_| "Настройките са заключени.".into())
+    }
 }
 
 fn keyring_entry() -> Result<keyring::Entry, String> {
@@ -202,7 +215,10 @@ pub(crate) fn accessibility_granted() -> bool {
     }
 }
 
-fn show_main_window(app: &AppHandle, settings_page: bool) {
+fn show_main_window(app: &AppHandle, settings_page: bool, request: MainWindowRequest) {
+    if !main_window_should_open(request) {
+        return;
+    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
@@ -242,8 +258,8 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id.as_ref() {
-            "show" => show_main_window(app, false),
-            "settings" => show_main_window(app, true),
+            "show" => show_main_window(app, false, MainWindowRequest::ExplicitMenu),
+            "settings" => show_main_window(app, true, MainWindowRequest::ExplicitMenu),
             "stop" => {
                 if app
                     .state::<AppState>()
@@ -285,7 +301,7 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
                 ..
             } = event
             {
-                show_main_window(tray.app_handle(), false);
+                show_main_window(tray.app_handle(), false, MainWindowRequest::ExplicitMenu);
             }
         });
     if let Some(icon) = app.default_window_icon().cloned() {
@@ -320,6 +336,10 @@ pub fn run() {
         })
         .setup(|app| {
             install_tray(app)?;
+            #[cfg(debug_assertions)]
+            if let Some(main) = app.get_webview_window("main") {
+                main.set_title("AIDOO Whisper Lite DEV")?;
+            }
             if let Some(overlay) = app.get_webview_window("overlay") {
                 let _ = overlay.set_ignore_cursor_events(true);
                 let _ = overlay.set_shadow(false);
@@ -348,12 +368,21 @@ pub fn run() {
             aidoo_select_patient,
             aidoo_next_patient,
             aidoo_begin_status,
+            aidoo_begin_treatment,
+            aidoo_select_treatment_tooth,
             aidoo_start_status_visit,
             aidoo_apply_status,
+            aidoo_apply_statuses,
             aidoo_finish_status,
+            aidoo_read_status,
+            aidoo_read_treatments,
+            aidoo_read_visits,
+            aidoo_read_patient_data,
+            aidoo_create_treatment,
             aidoo_add_procedure,
             aidoo_write_diagnosis,
             aidoo_write_official_note,
+            aidoo_preview_official_note,
             aidoo_find_schedule_slot,
             aidoo_book_schedule_slot,
             aidoo_status_catalog,
@@ -370,6 +399,7 @@ pub fn run() {
             begin_shortcut_capture,
             cancel_shortcut_capture,
             test_microphone,
+            preview_live_voice,
             start_wake_word_calibration,
             stop_wake_word_calibration,
             prepare_live_session,
@@ -386,11 +416,11 @@ pub fn run() {
             retranscribe_history_item,
             delete_failed_recording,
             current_recording_snapshot,
+            open_live_diagnostics,
             copy_text,
             delete_history_item,
             open_accessibility_settings,
             refresh_accessibility_status,
-            reposition_overlay,
             open_local_path,
             create_diagnostic_bundle
         ])
@@ -415,7 +445,7 @@ pub fn run() {
         tauri::RunEvent::Reopen {
             has_visible_windows: false,
             ..
-        } => show_main_window(app, false),
+        } => show_main_window(app, false, MainWindowRequest::SystemReopen),
         tauri::RunEvent::Resumed => {
             stop_wake_word_listener(&app.state::<AppState>());
             schedule_wake_word_reconcile(app, std::time::Duration::from_secs(1));

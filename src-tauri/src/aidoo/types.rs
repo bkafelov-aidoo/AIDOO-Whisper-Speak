@@ -31,6 +31,8 @@ pub struct LoginClinic {
     pub id: String,
     #[serde(default)]
     pub current_currency: Option<String>,
+    #[serde(default)]
+    pub works_with_nzok: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,6 +53,10 @@ pub struct PatientSummary {
     pub mobile_phone: Option<String>,
     #[serde(default)]
     pub birthdate: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub identifier: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub identifier_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +74,127 @@ pub struct Visit {
     pub is_finished: bool,
     #[serde(default)]
     pub cancelled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VisitStatusReference {
+    pub id: String,
+    #[serde(default)]
+    pub created_status_update: bool,
+    #[serde(default)]
+    pub cancelled: bool,
+    #[serde(default)]
+    pub is_finished: bool,
+    #[serde(default)]
+    pub timestamp: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatientRecordDetails {
+    pub first_name: String,
+    #[serde(default)]
+    pub middle_name: Option<String>,
+    pub last_name: String,
+    #[serde(default)]
+    pub birthdate: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub mobile_phone: Option<String>,
+    #[serde(default)]
+    pub city: Option<String>,
+    #[serde(default)]
+    pub street: Option<String>,
+    #[serde(default)]
+    pub street_number: Option<String>,
+    #[serde(default)]
+    pub neighbourhood: Option<String>,
+    #[serde(default)]
+    pub block: Option<String>,
+    #[serde(default)]
+    pub entrance: Option<String>,
+    #[serde(default)]
+    pub floor: Option<String>,
+    #[serde(default)]
+    pub apartment: Option<String>,
+    #[serde(default)]
+    pub allergies: serde_json::Value,
+    #[serde(default)]
+    pub diseases: serde_json::Value,
+    #[serde(default)]
+    pub medical_history: serde_json::Value,
+    #[serde(default)]
+    pub public_health_insured: Option<bool>,
+    #[serde(default)]
+    pub pensioner: bool,
+    #[serde(default)]
+    pub institutionalized: bool,
+    #[serde(default)]
+    pub mental_illness: bool,
+    #[serde(default)]
+    pub gender: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PatientDataCategory {
+    Identity,
+    Contact,
+    Medical,
+    Insurance,
+    All,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PatientDataItem {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PatientDataReadResult {
+    pub items: Vec<PatientDataItem>,
+    pub spoken_summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TreatmentReadEntry {
+    pub tooth: String,
+    pub diagnosis: Option<String>,
+    pub procedures: Vec<String>,
+    pub note: Option<String>,
+    pub status: Option<String>,
+    pub is_milk_tooth: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TreatmentReadResult {
+    pub entries: Vec<TreatmentReadEntry>,
+    pub spoken_summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VisitReadEntry {
+    pub date: String,
+    pub finished: bool,
+    pub has_status: bool,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VisitReadResult {
+    pub entries: Vec<VisitReadEntry>,
+    pub spoken_summary: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -170,6 +297,24 @@ pub struct VisitTeethStatusResponse {
     pub visit_teeth_status: Vec<VisitToothStatus>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusReadEntry {
+    pub tooth: String,
+    pub statuses: Vec<String>,
+    pub regions: Vec<String>,
+    pub is_milk_tooth: bool,
+    pub for_observation: bool,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusReadResult {
+    pub entries: Vec<StatusReadEntry>,
+    pub spoken_summary: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WriteTeethStatusRequest<'a> {
@@ -253,6 +398,8 @@ pub struct PreparedStatusDraft {
 pub struct StatusEntryState {
     pub ready: bool,
     pub needs_visit: bool,
+    pub funding_choice_required: bool,
+    pub nzok_available: bool,
     pub message: String,
 }
 
@@ -278,6 +425,16 @@ pub struct SpokenStatusChange {
 pub struct ClinicalWriteResult {
     pub spoken_summary: String,
     pub verification: VerificationResult,
+    pub visible_in_browser: bool,
+    pub presentation_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TreatmentToothSelectionResult {
+    pub tooth: String,
+    pub spoken_summary: String,
+    pub visible_in_browser: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -354,6 +511,49 @@ pub struct TreatmentWrite {
     pub is_milk_tooth: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTreatmentRequest<'a> {
+    pub tooth: &'a str,
+    pub diagnosis_id: Option<&'a str>,
+    pub treatment_id: Option<&'a str>,
+    pub note: Option<&'a str>,
+    pub procedures: Vec<CreateTreatmentProcedureRequest<'a>>,
+    pub nzis: bool,
+    pub nhif: bool,
+    pub is_milk_tooth: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTreatmentProcedureRequest<'a> {
+    pub procedure_id: &'a str,
+    pub price: &'static str,
+    pub discount: &'static str,
+}
+
+impl<'a> CreateTreatmentRequest<'a> {
+    pub fn new(treatment: &'a TreatmentWrite, procedure: Option<&'a ProcedureWrite>) -> Self {
+        Self {
+            tooth: &treatment.tooth,
+            diagnosis_id: treatment.diagnosis_id.as_deref(),
+            treatment_id: treatment.treatment_id.as_deref(),
+            note: treatment.note.as_deref(),
+            procedures: procedure
+                .map(|procedure| CreateTreatmentProcedureRequest {
+                    procedure_id: &procedure.procedure_id,
+                    price: "0",
+                    discount: "0",
+                })
+                .into_iter()
+                .collect(),
+            nzis: false,
+            nhif: false,
+            is_milk_tooth: treatment.is_milk_tooth,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcedureWrite {
@@ -378,6 +578,27 @@ pub struct TreatmentChange {
     pub note: Option<String>,
     #[serde(default)]
     pub procedure_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SpokenTreatmentChange {
+    pub tooth: String,
+    #[serde(default)]
+    pub is_milk_tooth: bool,
+    #[serde(default)]
+    pub diagnosis: Option<String>,
+    #[serde(default)]
+    pub procedures: Vec<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NzokStatusCheckRequest<'a> {
+    pub signed_nzis_xml: &'a str,
+    pub nzok_data: &'a serde_json::Value,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -522,6 +743,13 @@ pub struct StatusVisitResult {
     pub verification: VerificationResult,
 }
 
+#[derive(Debug, Clone)]
+pub struct TreatmentVisitResult {
+    pub visit: Option<Visit>,
+    pub created: bool,
+    pub verification: VerificationResult,
+}
+
 pub fn sorted_unique(values: &[String]) -> Vec<String> {
     values
         .iter()
@@ -531,12 +759,28 @@ pub fn sorted_unique(values: &[String]) -> Vec<String> {
         .collect()
 }
 
-pub fn status_map(values: &[ToothStatus]) -> BTreeMap<(String, Vec<String>), ToothStatusWrite> {
-    values
-        .iter()
-        .map(|value| {
-            let write = ToothStatusWrite::from(value);
-            ((write.tooth.clone(), write.regions.clone()), write)
-        })
-        .collect()
+pub fn status_map(
+    values: &[ToothStatus],
+) -> Result<BTreeMap<(String, Vec<String>), ToothStatusWrite>, String> {
+    let mut merged = BTreeMap::<(String, Vec<String>), ToothStatusWrite>::new();
+    for value in values {
+        let write = ToothStatusWrite::from(value);
+        let key = (write.tooth.clone(), write.regions.clone());
+        if let Some(existing) = merged.get_mut(&key) {
+            if existing.is_milk_tooth != write.is_milk_tooth
+                || existing.for_observation != write.for_observation
+                || existing.note != write.note
+            {
+                return Err(format!(
+                    "AIDOO върна противоречиви статусни редове за зъб {} и едни и същи повърхности.",
+                    write.tooth
+                ));
+            }
+            existing.statuses.extend(write.statuses);
+            existing.statuses = sorted_unique(&existing.statuses);
+        } else {
+            merged.insert(key, write);
+        }
+    }
+    Ok(merged)
 }

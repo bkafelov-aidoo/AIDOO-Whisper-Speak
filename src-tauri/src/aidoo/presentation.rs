@@ -1,7 +1,13 @@
+use super::browser;
 use super::clinic::parse_clinic_reference;
-use std::process::{Command, Stdio};
+use crate::AppState;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
+
+const ALL_TREATMENT_TEETH: [&str; 32] = [
+    "18", "17", "16", "15", "14", "13", "12", "11", "21", "22", "23", "24", "25", "26", "27", "28",
+    "48", "47", "46", "45", "44", "43", "42", "41", "31", "32", "33", "34", "35", "36", "37", "38",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatientView {
@@ -18,88 +24,109 @@ impl PatientView {
     }
 }
 
-const CHROME_PRESENT_SCRIPT: &str = r#"
-on run argv
-  set clinicPrefix to item 1 of argv
-  set targetURL to item 2 of argv
-  tell application "Google Chrome"
-    if (count of windows) is 0 then
-      make new window
-    end if
-    repeat with browserWindow in windows
-      repeat with tabIndex from 1 to (count of tabs of browserWindow)
-        set browserTab to tab tabIndex of browserWindow
-        set tabURL to URL of browserTab
-        if tabURL starts with clinicPrefix then
-          set URL of browserTab to targetURL
-          set active tab index of browserWindow to tabIndex
-          set index of browserWindow to 1
-          activate
-          return "reused"
-        end if
-      end repeat
-    end repeat
-    tell front window
-      make new tab at end of tabs with properties {URL:targetURL}
-      set active tab index to (count of tabs)
-    end tell
-    activate
-    return "opened"
-  end tell
-end run
-"#;
-
-pub fn present_patient(app: AppHandle, clinic_link: String, patient_id: String, view: PatientView) {
+pub fn present_patient(
+    app: &AppHandle,
+    state: &AppState,
+    patient_id: String,
+    view: PatientView,
+) -> Result<(), String> {
+    let clinic_link = clinic_link(state)?;
     let target = match patient_view_url(&clinic_link, &patient_id, view, sync_nonce()) {
         Ok(target) => target,
         Err(error) => {
-            let _ = app.emit("toast", error);
-            return;
+            let _ = app.emit("toast", error.clone());
+            return Err(error);
         }
     };
     present_target(
         app,
         target,
-        "AIDOO промяната е запазена, но пациентският екран не можа да бъде показан.",
-    );
+        "AIDOO промяната е запазена, но пациентският екран в Chrome не можа да бъде показан.",
+    )
 }
 
-pub fn present_schedule(app: AppHandle, clinic_link: String, date: String, doctor_id: String) {
+pub fn present_treatment_tooth(
+    app: &AppHandle,
+    state: &AppState,
+    patient_id: String,
+    tooth: String,
+) -> Result<(), String> {
+    let clinic_link = clinic_link(state)?;
+    let target = match treatment_tooth_view_url(&clinic_link, &patient_id, &tooth, sync_nonce()) {
+        Ok(target) => target,
+        Err(error) => {
+            let _ = app.emit("toast", error.clone());
+            return Err(error);
+        }
+    };
+    present_target(
+        app,
+        target,
+        "Зъбът не можа да бъде показан в Treatment екрана на AIDOO.",
+    )
+}
+
+pub fn present_schedule(
+    app: &AppHandle,
+    state: &AppState,
+    date: String,
+    doctor_id: String,
+) -> Result<(), String> {
+    let clinic_link = clinic_link(state)?;
     let target = match schedule_view_url(&clinic_link, &date, &doctor_id, sync_nonce()) {
         Ok(target) => target,
         Err(error) => {
-            let _ = app.emit("toast", error);
-            return;
+            let _ = app.emit("toast", error.clone());
+            return Err(error);
         }
     };
     present_target(
         app,
         target,
-        "Графикът е обработен, но страницата му не можа да бъде показана.",
-    );
+        "Графикът е обработен, но страницата му в Chrome не можа да бъде показана.",
+    )
 }
 
-fn present_target(app: AppHandle, target: PatientViewTarget, failure_message: &'static str) {
-    let thread_app = app.clone();
-    let _ = std::thread::Builder::new()
-        .name("aidoo-browser-presentation".into())
-        .spawn(move || {
-            if present_in_chrome(&target.clinic_prefix, &target.url).is_ok() {
-                return;
-            }
-            if open_in_chrome(&target.url).is_ok() {
-                return;
-            }
-            if open_in_default_browser(&target.url).is_ok() {
-                return;
-            }
-            crate::storage::append_diagnostic("AIDOO browser presentation failed");
-            let _ = thread_app.emit("toast", failure_message);
-        });
+pub fn close() {
+    browser::forget_managed_window();
+}
+
+fn clinic_link(state: &AppState) -> Result<String, String> {
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| "Настройките са заключени.".to_string())?;
+    if !settings.aidoo_browser_sync_enabled {
+        return Err("Браузърната синхронизация с AIDOO е изключена.".into());
+    }
+    settings
+        .aidoo_clinic_url
+        .clone()
+        .or_else(|| settings.aidoo_clinic_slug.clone())
+        .ok_or_else(|| "Липсва линк към AIDOO клиниката.".to_string())
+}
+
+fn present_target(
+    app: &AppHandle,
+    target: PatientViewTarget,
+    failure_message: &'static str,
+) -> Result<(), String> {
+    match browser::present(&target.url) {
+        Ok(()) => {
+            crate::storage::append_diagnostic("AIDOO Chrome presentation confirmed.");
+            Ok(())
+        }
+        Err(error) => {
+            crate::storage::append_diagnostic(&format!(
+                "AIDOO Chrome presentation failed: {error}"
+            ));
+            let _ = app.emit("toast", format!("{failure_message} {error}"));
+            Err(error)
+        }
+    }
 }
 
 struct PatientViewTarget {
-    clinic_prefix: String,
     url: String,
 }
 
@@ -107,6 +134,32 @@ fn patient_view_url(
     clinic_link: &str,
     patient_id: &str,
     view: PatientView,
+    nonce: u128,
+) -> Result<PatientViewTarget, String> {
+    patient_view_url_with_selected_teeth(clinic_link, patient_id, view, "", nonce)
+}
+
+fn treatment_tooth_view_url(
+    clinic_link: &str,
+    patient_id: &str,
+    tooth: &str,
+    nonce: u128,
+) -> Result<PatientViewTarget, String> {
+    let selected_teeth = treatment_selected_teeth(tooth)?;
+    patient_view_url_with_selected_teeth(
+        clinic_link,
+        patient_id,
+        PatientView::Treatment,
+        &selected_teeth,
+        nonce,
+    )
+}
+
+fn patient_view_url_with_selected_teeth(
+    clinic_link: &str,
+    patient_id: &str,
+    view: PatientView,
+    selected_teeth: &str,
     nonce: u128,
 ) -> Result<PatientViewTarget, String> {
     if patient_id.is_empty()
@@ -124,12 +177,31 @@ fn patient_view_url(
         "Линкът към AIDOO клиниката не съдържа валиден входен маршрут.".to_string()
     })?;
     Ok(PatientViewTarget {
-        clinic_prefix: format!("{record_base}/"),
         url: format!(
-            "{record_base}/medical-record?patientid={patient_id}&tab=record&mode={}&selectedTeeth=&triggerNzokChecksProp=true&aidooControlSync={nonce}",
-            view.mode()
+            "{record_base}/medical-record?patientid={patient_id}&tab=record&mode={}&selectedTeeth={selected_teeth}&triggerNzokChecksProp=true&aidooControlSync={nonce}",
+            view.mode(),
         ),
     })
+}
+
+fn treatment_selected_teeth(tooth: &str) -> Result<String, String> {
+    let tooth = tooth.trim();
+    if tooth == "*" {
+        return Ok(ALL_TREATMENT_TEETH.join(","));
+    }
+    if tooth.len() != 2 || !tooth.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("Невалиден номер на зъб за Treatment екрана.".into());
+    }
+    let bytes = tooth.as_bytes();
+    let quadrant = bytes[0] - b'0';
+    let position = bytes[1] - b'0';
+    if (1..=4).contains(&quadrant) && (1..=8).contains(&position) {
+        return Ok(tooth.to_string());
+    }
+    if (5..=8).contains(&quadrant) && (1..=5).contains(&position) {
+        return Ok(format!("{}{}", quadrant - 4, position));
+    }
+    Err("Невалиден номер на зъб за Treatment екрана.".into())
 }
 
 fn schedule_view_url(
@@ -152,7 +224,6 @@ fn schedule_view_url(
         "Линкът към AIDOO клиниката не съдържа валиден входен маршрут.".to_string()
     })?;
     Ok(PatientViewTarget {
-        clinic_prefix: format!("{record_base}/"),
         url: format!(
             "{record_base}/schedule?mode=doctors&active-date={date}&selected-doctors=%5B%22{doctor_id}%22%5D&aidooControlSync={nonce}"
         ),
@@ -164,68 +235,6 @@ fn sync_nonce() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
-}
-
-#[cfg(target_os = "macos")]
-fn present_in_chrome(clinic_prefix: &str, url: &str) -> Result<(), String> {
-    let status = Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg(CHROME_PRESENT_SCRIPT)
-        .arg("--")
-        .arg(clinic_prefix)
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|_| "Chrome automation could not start".to_string())?;
-    status
-        .success()
-        .then_some(())
-        .ok_or_else(|| "Chrome automation was not available".into())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn present_in_chrome(_clinic_prefix: &str, _url: &str) -> Result<(), String> {
-    Err("Chrome automation is not implemented on this platform".into())
-}
-
-#[cfg(target_os = "macos")]
-fn open_in_chrome(url: &str) -> Result<(), String> {
-    Command::new("/usr/bin/open")
-        .args(["-a", "Google Chrome", url])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|_| "Google Chrome could not start".to_string())?
-        .success()
-        .then_some(())
-        .ok_or_else(|| "Google Chrome rejected the AIDOO URL".into())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn open_in_chrome(_url: &str) -> Result<(), String> {
-    Err("Google Chrome presentation is not implemented on this platform".into())
-}
-
-#[cfg(target_os = "macos")]
-fn open_in_default_browser(url: &str) -> Result<(), String> {
-    Command::new("/usr/bin/open")
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|_| "The default browser could not start".to_string())?
-        .success()
-        .then_some(())
-        .ok_or_else(|| "The default browser rejected the AIDOO URL".into())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn open_in_default_browser(_url: &str) -> Result<(), String> {
-    Err("Browser presentation is not implemented on this platform".into())
 }
 
 #[cfg(test)]
@@ -241,10 +250,6 @@ mod tests {
             patient_view_url(&clinic, "patient-id", PatientView::Treatment, 43).unwrap();
 
         assert_eq!(
-            status.clinic_prefix,
-            format!("{scheme}aidoo-web.on.dev-craft.tech/clinics/demo/")
-        );
-        assert_eq!(
             status.url,
             format!(
                 "{scheme}aidoo-web.on.dev-craft.tech/clinics/demo/medical-record?patientid=patient-id&tab=record&mode=status&selectedTeeth=&triggerNzokChecksProp=true&aidooControlSync=42"
@@ -255,10 +260,42 @@ mod tests {
     }
 
     #[test]
+    fn treatment_route_can_present_requested_tooth() {
+        let scheme = ["https:", "//"].concat();
+        let clinic = format!("{scheme}app.aidoo.bg/clinics/demo/login");
+        let treatment = treatment_tooth_view_url(&clinic, "patient-id", "26", 43).unwrap();
+
+        assert!(treatment.url.contains("&selectedTeeth=26&"));
+    }
+
+    #[test]
+    fn milk_teeth_use_the_deployed_permanent_body_key_without_clicking_the_number() {
+        assert_eq!(treatment_selected_teeth("51").unwrap(), "11");
+        assert_eq!(treatment_selected_teeth("65").unwrap(), "25");
+        assert_eq!(treatment_selected_teeth("75").unwrap(), "35");
+        assert_eq!(treatment_selected_teeth("85").unwrap(), "45");
+    }
+
+    #[test]
+    fn general_treatment_expands_to_the_exact_deployed_chart_order() {
+        assert_eq!(
+            treatment_selected_teeth("*").unwrap(),
+            ALL_TREATMENT_TEETH.join(",")
+        );
+    }
+
+    #[test]
+    fn refuses_invalid_permanent_and_milk_tooth_numbers() {
+        for tooth in ["", "0", "19", "50", "56", "86", "99", "2&mode=status"] {
+            assert!(treatment_selected_teeth(tooth).is_err(), "accepted {tooth}");
+        }
+    }
+
+    #[test]
     fn refuses_patient_ids_that_could_escape_the_query_value() {
         let clinic = ["https:", "//app.aidoo.bg/clinics/demo/login"].concat();
         assert!(
-            patient_view_url(&clinic, "patient&mode=treatment", PatientView::Status, 1,).is_err()
+            patient_view_url(&clinic, "patient&mode=treatment", PatientView::Status, 1).is_err()
         );
     }
 

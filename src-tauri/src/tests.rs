@@ -1,14 +1,15 @@
 use super::{
     commit_staged_history_deletion, diagnostic_settings, is_managed_output_path,
-    localized_native_error, operation_allows_quit, overlay_accepts_pointer_input,
-    overlay_visible_for_state, path_is_authorized_for_open, prepare_history_files_for_deletion,
+    live_phase_hides_main_window, localized_native_error, main_window_should_open,
+    operation_allows_quit, overlay_accepts_pointer_input, overlay_visible_for_state,
+    path_is_authorized_for_open, prepare_history_files_for_deletion,
     preserve_completed_recovery_with, recording_watchdog_should_stop,
     recover_pending_history_deletion, recovery_plan, resolve_failed_recording_after_success_with,
     resolved_tray_state, restore_staged_history_files, save_local_transcription_files,
     save_local_transcription_files_with_stem, stage_history_files_for_deletion, tray_tooltip,
-    voice_watchdog_action, AppSettings, AssistantStartRequest, FailedRecording,
-    PendingDiagnosticFile, RecoveryPlan, TranscriptEntry, VoiceWatchdogAction,
-    CHARGED_RECOVERY_ERROR,
+    voice_watchdog_action, wake_activation_window_phase, AppSettings, AssistantStartRequest,
+    FailedRecording, MainWindowRequest, PendingDiagnosticFile, RecoveryPlan, TranscriptEntry,
+    VoiceWatchdogAction, CHARGED_RECOVERY_ERROR,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -20,6 +21,43 @@ fn wake_request_survives_a_lost_ui_event_and_is_consumed_once() {
     request.request();
     assert!(request.take());
     assert!(!request.take());
+}
+
+#[test]
+fn wake_activation_keeps_the_live_microphone_webview_available() {
+    assert_eq!(wake_activation_window_phase(), "preparing");
+    assert!(!live_phase_hides_main_window(wake_activation_window_phase()));
+}
+
+#[test]
+fn application_startup_does_not_open_or_focus_any_window() {
+    let config: serde_json::Value =
+        serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+    let windows = config["app"]["windows"].as_array().unwrap();
+    for label in ["main", "overlay"] {
+        let window = windows
+            .iter()
+            .find(|window| window["label"] == label)
+            .unwrap();
+        // Tauri defaults both fields to true when omitted. Test the packaged configuration,
+        // not only a visibility helper, so an unsolicited startup window cannot regress.
+        assert_eq!(
+            window["visible"], false,
+            "{label} opens on application launch"
+        );
+        assert_eq!(
+            window["focus"], false,
+            "{label} steals focus on application launch"
+        );
+    }
+}
+
+#[test]
+fn system_reopen_does_not_open_a_window_but_explicit_settings_remain_accessible() {
+    for _ in 0..20 {
+        assert!(!main_window_should_open(MainWindowRequest::SystemReopen));
+    }
+    assert!(main_window_should_open(MainWindowRequest::ExplicitMenu));
 }
 
 #[test]
@@ -641,12 +679,19 @@ fn overlay_stays_visible_until_dictation_is_ready_again() {
 }
 
 #[test]
-fn overlay_accepts_clicks_only_while_its_stop_button_is_actionable() {
-    assert!(overlay_accepts_pointer_input("starting"));
-    assert!(overlay_accepts_pointer_input("recording"));
-    for state in ["idle", "transcribing", "done", "error"] {
-        assert!(!overlay_accepts_pointer_input(state), "{state}");
+fn every_visible_overlay_state_can_be_dragged() {
+    for state in ["starting", "recording", "transcribing", "done", "error"] {
+        assert!(overlay_accepts_pointer_input(state), "{state}");
     }
+    assert!(!overlay_accepts_pointer_input("idle"));
+    assert!(!overlay_accepts_pointer_input("unknown"));
+}
+
+#[test]
+fn live_microphone_preparation_keeps_its_webview_available() {
+    assert!(!live_phase_hides_main_window("preparing"));
+    assert!(live_phase_hides_main_window("connecting"));
+    assert!(live_phase_hides_main_window("listening"));
 }
 
 #[test]
